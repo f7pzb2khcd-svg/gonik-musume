@@ -130,8 +130,9 @@ def extract_only():
 def create_room_final():
     data = request.json
     url = data.get('url')
-    participants = data.get('participants')
-    scheduled_time = data.get('scheduled_time')
+    participants = data.get('participants') 
+    scheduled_time = data.get('scheduled_time') 
+    map_type = data.get('map_type', 'short') # 기본값 short (단거리)
     
     if not url or not participants or not scheduled_time:
         return jsonify({"success": False, "message": "필수 데이터가 누락되었습니다."}), 400
@@ -147,6 +148,7 @@ def create_room_final():
         "participants": participants,
         "seed": race_seed,
         "scheduled_time": scheduled_time,
+        "map_type": map_type,
         "created_at": int(time.time())
     }
     
