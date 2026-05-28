@@ -105,37 +105,16 @@ def extract_racers(url):
         if not isinstance(cmt, dict): continue
         uid = cmt.get("user_id", "")
         nick = cmt.get("name", "ㅇㅇ")
-        reg_date = cmt.get("reg_date", "") 
+        reg_date = cmt.get("reg_date", "") # 디시 원본 날짜 문자열 ("2026.05.28 19:30:00")
         
         if not uid: continue
         
         user_key = f"{nick}({uid})"
-        cmt_timestamp = 0 # 파싱 실패 대비 안전장치 (기본값 0)
         
-        if reg_date:
-            try:
-                # 💡 어떤 형태의 날짜든 상관없이 숫자만 싹 추출
-                nums = re.findall(r'\d+', reg_date)
-                if len(nums) >= 5:
-                    y = int(nums[0])
-                    if y < 100: y += 2000 # 24년 -> 2024년 변환
-                    m = int(nums[1])
-                    d = int(nums[2])
-                    h = int(nums[3])
-                    minute = int(nums[4])
-                    s = int(nums[5]) if len(nums) >= 6 else 0
-                    
-                    dt = datetime(y, m, d, h, minute, s)
-                    cmt_timestamp = int(dt.timestamp()) # 절대적인 초 단위 숫자로 변환
-            except:
-                pass
-                
-        # 한 명의 유저가 여러 개를 달아도 가장 '처음' 단 댓글 기준
         if user_key not in racers:
-            racers[user_key] = cmt_timestamp
+            racers[user_key] = reg_date
             
-    # 💡 [{"name": "닉네임", "timestamp": 1716900000}, ...] 형태로 전달
-    participant_list = [{"name": k, "timestamp": v} for k, v in racers.items()]
+    participant_list = [{"name": k, "reg_date": v} for k, v in racers.items()]
     return participant_list, None
 
 @app.route('/api/extract_only', methods=['POST'])
