@@ -7,6 +7,7 @@ import re
 import string
 import random
 import time
+import datetime
 
 app = Flask(__name__)
 CORS(app)
@@ -17,9 +18,39 @@ def generate_room_id(length=6):
     characters = string.ascii_uppercase + string.digits
     return ''.join(random.choice(characters) for _ in range(length))
 
-def extract_racers(url):
-    gall_id = None
-    gall_no = None
+def extract_racers(url, cutoff_time=None): # 💡 인자 추가
+    
+    # ... (중략: 기존 URL 파싱 및 세션 설정 코드 그대로 유지) ...
+    
+    racers = set()
+    if not cmt_data or "comments" not in cmt_data or not cmt_data["comments"]:
+        return [], "이 게시글에는 고닉/반고닉 댓글이 없습니다."
+        
+    for cmt in cmt_data["comments"]:
+        if not isinstance(cmt, dict): continue
+        uid = cmt.get("user_id", "")
+        nick = cmt.get("name", "ㅇㅇ")
+        reg_date = cmt.get("reg_date", "") # 💡 디시 API가 내려주는 댓글 작성 시간 (예: "2026.05.28 19:38:00")
+        
+        if not uid: continue
+
+        # 💡 [핵심 패치] 시간 컷 필터링 로직
+        if cutoff_time and reg_date:
+            try:
+                # 문자열 날짜를 시간 객체로 변환 후 타임스탬프(초)로 변경
+                cmt_time_obj = datetime.datetime.strptime(reg_date, '%Y.%m.%d %H:%M:%S')
+                cmt_timestamp = cmt_time_obj.timestamp()
+                
+                # 기준 시간보다 나중에 달린 댓글은 명단에서 제외 (스킵)
+                if cmt_timestamp > cutoff_time:
+                    continue
+            except Exception as e:
+                # 만약 디시 API의 시간 포맷이 예고 없이 바뀌어 에러가 나면 해당 댓글은 일단 통과시킴
+                pass
+        
+        racers.add(f"{nick}({uid})")
+        
+    return list(racers), None
 
     # 1. 🔍 URL에서 갤러리 ID(id)와 글 번호(no) 완벽 추출 (파라미터 or 모바일 경로 호환)
     parsed_url = urllib.parse.urlparse(url)
@@ -119,9 +150,14 @@ def extract_racers(url):
 def extract_only():
     data = request.json
     url = data.get('url')
+    cutoff_time = data.get('cutoff_time') # 💡 프론트엔드에서 보낸 시간 데이터 받기
+    
     if not url:
         return jsonify({"success": False, "message": "URL이 필요합니다."}), 400
-    participants, error = extract_racers(url)
+        
+    # 💡 추출 함수에 cutoff_time 인자 전달
+    participants, error = extract_racers(url, cutoff_time) 
+    
     if error:
         return jsonify({"success": False, "message": error}), 400
     return jsonify({"success": True, "participants": participants})
