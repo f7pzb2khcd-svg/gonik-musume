@@ -7,7 +7,6 @@ import re
 import string
 import random
 import time
-import datetime  # 💡 날짜/시간 계산을 위해 추가됨
 
 app = Flask(__name__)
 CORS(app)
@@ -22,7 +21,6 @@ def extract_racers(url):
     gall_id = None
     gall_no = None
 
-    # 1. URL에서 갤러리 ID(id)와 글 번호(no) 추출
     parsed_url = urllib.parse.urlparse(url)
     qs = urllib.parse.parse_qs(parsed_url.query)
     
@@ -38,7 +36,6 @@ def extract_racers(url):
     if not gall_id or not gall_no:
         return [], "URL에서 게시판 ID와 글 번호를 찾을 수 없습니다. 올바른 링크인지 확인해주세요."
 
-    # 2. 무조건 데스크탑 표준 링크로 강제 변환
     target_url = url
     if "m.dcinside.com" in url:
         target_url = f"https://gall.dcinside.com/board/view/?id={gall_id}&no={gall_no}"
@@ -53,7 +50,6 @@ def extract_racers(url):
         res = session.get(target_url, headers=headers, timeout=5)
         res.raise_for_status()
         
-        # 3. 디시인사이드 JS 리다이렉트 방어
         if "location.replace" in res.text:
             redirect_match = re.search(r"location\.replace\(['\"]([^'\"]+)['\"]\)", res.text)
             if redirect_match:
@@ -66,7 +62,6 @@ def extract_racers(url):
     except Exception as e:
         return [], f"게시글 접속 오류: {e}"
         
-    # 4. 보안 토큰 및 갤러리 타입 판별
     e_s_n_o = ""
     soup = BeautifulSoup(res.text, 'html.parser')
     token_input = soup.find('input', {'id': 'e_s_n_o'})
@@ -83,7 +78,6 @@ def extract_racers(url):
     elif "mini" in target_url or "mini" in final_url: 
         gall_type = "MI"
 
-    # 5. 비밀 댓글 API 호출
     ajax_url = "https://gall.dcinside.com/board/comment/"
     ajax_headers = headers.copy()
     ajax_headers["X-Requested-With"] = "XMLHttpRequest"
@@ -100,7 +94,6 @@ def extract_racers(url):
     except Exception as e:
         return [], f"댓글 API 로드 실패: {e}"
         
-    # 💡 [패치] 이름을 키로, 타임스탬프를 값으로 저장하는 딕셔너리 사용
     racers = {} 
     
     if not cmt_data or "comments" not in cmt_data or not cmt_data["comments"]:
@@ -110,24 +103,18 @@ def extract_racers(url):
         if not isinstance(cmt, dict): continue
         uid = cmt.get("user_id", "")
         nick = cmt.get("name", "ㅇㅇ")
-        reg_date = cmt.get("reg_date", "")
+        reg_date = cmt.get("reg_date", "") # 💡 "2026.05.28 19:38:00" 원본 문자열 추출
         
         if not uid or not reg_date: continue
         
-        try:
-            # 💡 [패치] 문자열 날짜를 타임스탬프(초)로 변환
-            cmt_time_obj = datetime.datetime.strptime(reg_date, '%Y.%m.%d %H:%M:%S')
-            cmt_timestamp = cmt_time_obj.timestamp()
-            user_key = f"{nick}({uid})"
-
-            # 처음 작성한 시간 1번만 기록 (다중 댓글 처리)
-            if user_key not in racers:
-                racers[user_key] = cmt_timestamp
-        except:
-            pass
+        user_key = f"{nick}({uid})"
         
-    # 💡 [패치] 딕셔너리를 [{name: "...", timestamp: ...}, ...] 형태의 리스트로 변환하여 리턴
-    participant_list = [{"name": k, "timestamp": v} for k, v in racers.items()]
+        # 💡 한 명의 유저가 여러 개를 달아도 가장 '처음' 단 댓글의 원본 문자열만 저장 (파싱 X)
+        if user_key not in racers:
+            racers[user_key] = reg_date
+            
+    # 💡 [{"name": "닉네임", "reg_date": "문자열"}, ...] 형태로 안전하게 포장해서 전달
+    participant_list = [{"name": k, "reg_date": v} for k, v in racers.items()]
     return participant_list, None
 
 @app.route('/api/extract_only', methods=['POST'])
