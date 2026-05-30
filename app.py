@@ -8,7 +8,6 @@ import string
 import random
 import time
 from datetime import datetime
-import re
 
 app = Flask(__name__)
 CORS(app)
@@ -101,7 +100,6 @@ def extract_racers(url):
     if not cmt_data or "comments" not in cmt_data or not cmt_data["comments"]:
         return [], "이 게시글에는 고닉/반고닉 댓글이 없습니다."
         
-    print("====== 🔍 [백엔드] 디시 API 댓글 데이터 추출 시작 ======")
     for cmt in cmt_data["comments"]:
         if not isinstance(cmt, dict): continue
         uid = cmt.get("user_id", "")
@@ -111,14 +109,9 @@ def extract_racers(url):
         if not uid: continue
         
         user_key = f"{nick}({uid})"
-        
         if user_key not in racers:
-            # 💡 [검증 구간] 실제로 어떤 문자열이 들어오는지 터미널에 출력
-            print(f"[백엔드] 유저: {user_key} / 획득한 날짜 원본: '{reg_date}'") 
             racers[user_key] = reg_date
             
-    print(f"====== 🔍 [백엔드] 총 {len(racers)}명 추출 완료 ======")
-    
     participant_list = [{"name": k, "reg_date": v} for k, v in racers.items()]
     return participant_list, None
 
@@ -126,15 +119,12 @@ def extract_racers(url):
 def extract_only():
     data = request.json
     url = data.get('url')
-    
     if not url:
         return jsonify({"success": False, "message": "URL이 필요합니다."}), 400
         
     participants, error = extract_racers(url)
-    
     if error:
         return jsonify({"success": False, "message": error}), 400
-        
     return jsonify({"success": True, "participants": participants})
 
 @app.route('/api/create_room_final', methods=['POST'])
@@ -144,6 +134,7 @@ def create_room_final():
     participants = data.get('participants') 
     scheduled_time = data.get('scheduled_time') 
     map_type = data.get('map_type', 'short')
+    bgm = data.get('bgm', 'none') # 💡 선택된 MP3 파일명 저장
     
     if not url or not participants or not scheduled_time:
         return jsonify({"success": False, "message": "필수 데이터가 누락되었습니다."}), 400
@@ -160,6 +151,7 @@ def create_room_final():
         "seed": race_seed,
         "scheduled_time": scheduled_time,
         "map_type": map_type,
+        "bgm": bgm,
         "created_at": int(time.time())
     }
     
