@@ -471,18 +471,24 @@ def create_room_final():
     cleanup_old_rooms()
     data = request.json
     
-    # 필수값 체크
-    if not data.get('url') or not data.get('participants'):
+    url = data.get('url')
+    participants = data.get('participants')
+    scheduled_time = data.get('scheduled_time')
+    bgm = data.get('bgm', 'none')
+    allow_custom_chat = data.get('allow_custom_chat', False)
+    
+    if not url or not participants or not scheduled_time:
         return jsonify({"success": False, "message": "데이터 누락"}), 400
         
     room_id = generate_room_id()
-    track_len = 8000 if data.get('map_type') == 'short' else 20000
+    
+    track_len = 2000 
     
     runners = []
     styles = ["도주", "선행", "선입", "추입"]
     conditions = [1.05, 1.02, 1.00, 0.98, 0.95]
     
-    for idx, p_name in enumerate(data['participants']):
+    for idx, p_name in enumerate(participants):
         style = random.choice(styles)
         raw_stats = {
             'spd': random.randint(400, 1200),
@@ -494,7 +500,6 @@ def create_room_final():
         cond_mult = random.choice(conditions)
         start_lane = 4.0 + (idx % 8) * 1.5 
         
-        # 💡 [핵심] 이제 인자 개수와 순서가 완벽하게 맞습니다!
         runner = Uma(idx, p_name, style, raw_stats, cond_mult, track_len, start_lane)
         runners.append(runner)
         
@@ -502,10 +507,13 @@ def create_room_final():
     replay_frames = simulator.run()
     
     ROOMS_DB[room_id] = {
+        "url": url,
         "participants": [{"id": r.id, "name": r.name, "style": r.style} for r in runners],
         "replay_data": replay_frames,
         "created_at": time.time(),
-        "allow_custom_chat": data.get('allow_custom_chat', False)
+        "scheduled_time": scheduled_time,  # 🚨 이게 누락돼서 프론트엔드가 고장났었습니다!
+        "bgm": bgm,
+        "allow_custom_chat": allow_custom_chat
     }
     
     return jsonify({"success": True, "room_id": room_id})
