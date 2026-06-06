@@ -157,25 +157,25 @@ STYLE_MODS = {
 CONDITIONS = {"최상": 1.05, "양호": 1.02, "보통": 1.00, "저조": 0.98, "최악": 0.95}
 
 class Uma:
-    def __init__(self, uid, name, style, raw_spd, raw_stam, raw_pow, raw_guts, raw_int, condition, track_len, start_lane):
+    def __init__(self, uid, name, style, raw_stats, cond_mult, track_len, start_lane):
         self.id = uid
         self.name = name
-        self.style = style
         self.original_style = style
+        self.style = style 
         
-        # 💡 컨디션 보정 적용
-        c_mod = CONDITIONS.get(condition, 1.0)
-        self.spd = raw_spd * c_mod
-        self.stam = raw_stam * c_mod
-        self.pow = raw_pow * c_mod
-        self.guts = raw_guts * c_mod
-        self.int = raw_int * c_mod
+        # 보정 스탯 계산
+        self.spd = raw_stats['spd'] * cond_mult
+        self.stam = raw_stats['stam'] * cond_mult
+        self.pow = raw_stats['pow'] * cond_mult
+        self.guts = raw_stats['guts'] * cond_mult
+        self.intel = raw_stats['intel'] * cond_mult
         
-        # 💡 체력 초기화
+        self.track_len = track_len
         self.max_hp = 0.8 * STYLE_MODS[style]["hp"] * self.stam + track_len
         self.hp = self.max_hp
         self.dist = 0.0
-        self.lane = start_lane # 0.0 ~ 1.5 폭 (1폭 = 11.25m 기준)
+        self.speed = 3.0
+        self.lane = start_lane
         
         # 💡 스타트 딜레이 및 기본 변수
         self.start_delay = random.uniform(0.0, 0.1)
@@ -468,57 +468,44 @@ class RaceSimulator:
 
 @app.route('/api/create_room_final', methods=['POST'])
 def create_room_final():
-    # 생성 전, 오래된 방 청소 (메모리 최적화)
     cleanup_old_rooms()
-    
     data = request.json
-    url = data.get('url')
-    participants = data.get('participants') 
-    scheduled_time = data.get('scheduled_time') 
-    map_type = data.get('map_type', 'short')
-    bgm = data.get('bgm', 'none')
     
-    if not url or not participants or not scheduled_time:
-        return jsonify({"success": False, "message": "필수 데이터가 누락되었습니다."}), 400
-        
-    if len(participants) < 2:
-        return jsonify({"success": False, "message": "최소 2명 이상의 주자가 필요합니다."}), 400
+    # 필수값 체크
+    if not data.get('url') or not data.get('participants'):
+        return jsonify({"success": False, "message": "데이터 누락"}), 400
         
     room_id = generate_room_id()
+    track_len = 8000 if data.get('map_type') == 'short' else 20000
     
-    # 트랙 길이 설정 (short: 8000, long: 20000)
-    track_len = 8000 if map_type == 'short' else 20000
-    
-    # 참가자 무작위 스탯 부여
     runners = []
     styles = ["도주", "선행", "선입", "추입"]
+    conditions = [1.05, 1.02, 1.00, 0.98, 0.95]
     
-    for idx, p_name in enumerate(participants):
+    for idx, p_name in enumerate(data['participants']):
         style = random.choice(styles)
-        # 스탯 난수 (프론트엔드와 유사하게 400~1200 보정)
-        spd = random.randint(500, 1200)
-        stam = random.randint(500, 1200)
-        power = random.randint(500, 1200)
-        guts = random.randint(500, 1200)
-        intel = random.randint(500, 1200)
+        raw_stats = {
+            'spd': random.randint(400, 1200),
+            'stam': random.randint(400, 1200),
+            'pow': random.randint(400, 1200),
+            'guts': random.randint(400, 1200),
+            'intel': random.randint(400, 1200)
+        }
+        cond_mult = random.choice(conditions)
+        start_lane = 4.0 + (idx % 8) * 1.5 
         
-        start_lane = 4.0 + (idx % 8) * 1.5 # 게이트 포지션 분산
-        runner = Uma(idx, p_name, style, spd, stam, power, guts, intel, track_len, start_lane)
+        # 💡 [핵심] 이제 인자 개수와 순서가 완벽하게 맞습니다!
+        runner = Uma(idx, p_name, style, raw_stats, cond_mult, track_len, start_lane)
         runners.append(runner)
         
-    # 파이썬 코어 엔진 실행 (사전 연산)
     simulator = RaceSimulator(runners, track_len)
     replay_frames = simulator.run()
     
-    # 룸 데이터베이스에 저장
     ROOMS_DB[room_id] = {
-        "url": url,
         "participants": [{"id": r.id, "name": r.name, "style": r.style} for r in runners],
-        "scheduled_time": scheduled_time,
-        "map_type": map_type,
-        "bgm": bgm,
-        "created_at": int(time.time()),
-        "replay_data": replay_frames # 프론트엔드는 이 데이터를 받아 재생합니다.
+        "replay_data": replay_frames,
+        "created_at": time.time(),
+        "allow_custom_chat": data.get('allow_custom_chat', False)
     }
     
     return jsonify({"success": True, "room_id": room_id})
