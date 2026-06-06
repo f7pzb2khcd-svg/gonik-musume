@@ -368,16 +368,15 @@ class RaceSimulator:
                 if self.time == r.start_delay:
                     r.speed = 3.0 # 게이트 출발 속도
 
-                # 기본 가속도
-                base_accel = math.sqrt(500 * r.pow) * 0.002
-                accel = base_accel * STYLE_MODS[r.style]["accel"][r.phase]
+                # 💡 4. 가속 및 감속 (파워 스탯 적용)
+                accel = math.sqrt(500 * r.pow) * 0.002 * STYLE_MODS[r.style]["acc"][r.phase]
                 
-                # 다릿심 충분 (파워 1200 이상 종반 돌입 시)
-                if r.is_spurting and r.pow >= 1200:
-                    leg_power = r.pow - 1200
-                    leg_bonus = 0.096 if leg_power < 200 else (0.147 if leg_power < 300 else 0.189)
-                    if r.has_kakari_history: leg_bonus *= 0.8
-                    accel += leg_bonus
+                # 💡 [수정] 다릿심 충분 (파워 1000 이상으로 완화)
+                if r.is_spurting and r.pow > 1000:
+                    # 기획서 기반 공식 연장: 1000을 기준으로 초과분 100당 약 0.05씩 증가하도록 적용
+                    leg_power = 0.05 + (r.pow - 1000) * 0.00015
+                    if r.has_kakari_history: leg_power *= 0.8
+                    accel += leg_power
 
                 # 스타트 대시
                 if r.is_start_dash:
@@ -481,22 +480,44 @@ def create_room_final():
         return jsonify({"success": False, "message": "데이터 누락"}), 400
         
     room_id = generate_room_id()
-    
     track_len = 2000 
     
     runners = []
+    
+    # 💡 [수정] 기획자님이 제시한 각질별 가중치 (%)
+    STAT_WEIGHTS = {
+        "도주": {'spd': 0.32, 'stam': 0.23, 'pow': 0.15, 'guts': 0.10, 'intel': 0.20},
+        "선행": {'spd': 0.30, 'stam': 0.22, 'pow': 0.18, 'guts': 0.12, 'intel': 0.18},
+        "선입": {'spd': 0.28, 'stam': 0.18, 'pow': 0.25, 'guts': 0.12, 'intel': 0.17},
+        "추입": {'spd': 0.30, 'stam': 0.15, 'pow': 0.28, 'guts': 0.12, 'intel': 0.15}
+    }
+    
     styles = ["도주", "선행", "선입", "추입"]
     conditions = [1.05, 1.02, 1.00, 0.98, 0.95]
     
     for idx, p_name in enumerate(participants):
         style = random.choice(styles)
-        raw_stats = {
-            'spd': random.randint(400, 1200),
-            'stam': random.randint(400, 1200),
-            'pow': random.randint(400, 1200),
-            'guts': random.randint(400, 1200),
-            'intel': random.randint(400, 1200)
-        }
+        weights = STAT_WEIGHTS[style]
+        
+        # 1. 기본 스탯 300 
+        raw_stats = {'spd': 300, 'stam': 300, 'pow': 300, 'guts': 300, 'intel': 300}
+        pool = 2500 # 남은 스탯
+        
+        # 2. 가중치에 맞춰 2500 분배
+        for k in raw_stats.keys():
+            raw_stats[k] += int(pool * weights[k])
+            
+        # 3. 최대합 4000 유지하며 자연스러운 랜덤 노이즈 추가 (+/- 최대 50)
+        # 단, 스탯은 1200을 넘을 수 없음
+        for _ in range(15):
+            k1, k2 = random.sample(list(raw_stats.keys()), 2)
+            if raw_stats[k1] < 1200 and raw_stats[k2] > 300:
+                transfer = random.randint(1, 20)
+                # 1200 초과, 300 미만으로 떨어지지 않게 보정
+                transfer = min(transfer, 1200 - raw_stats[k1], raw_stats[k2] - 300)
+                raw_stats[k1] += transfer
+                raw_stats[k2] -= transfer
+
         cond_mult = random.choice(conditions)
         start_lane = 4.0 + (idx % 8) * 1.5 
         
@@ -511,7 +532,7 @@ def create_room_final():
         "participants": [{"id": r.id, "name": r.name, "style": r.style} for r in runners],
         "replay_data": replay_frames,
         "created_at": time.time(),
-        "scheduled_time": scheduled_time,  # 🚨 이게 누락돼서 프론트엔드가 고장났었습니다!
+        "scheduled_time": scheduled_time,
         "bgm": bgm,
         "allow_custom_chat": allow_custom_chat
     }
