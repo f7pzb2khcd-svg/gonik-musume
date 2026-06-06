@@ -245,7 +245,7 @@ class RaceSimulator:
             # 1. 흥분 상태 (Kakari) 판정 (2~9구간 진입 시)
             # ==========================================
             if r.section != prev_section and 2 <= r.section <= 9 and not r.is_kakari and not r.has_kakari_history:
-                prob = math.pow(6.5 / math.log10(0.1 * r.int + 1), 2) / 100.0
+                prob = math.pow(6.5 / math.log10(0.1 * r.intel + 1), 2) / 100.0
                 if random.random() < prob:
                     r.is_kakari = True
                     r.has_kakari_history = True
