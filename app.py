@@ -25,10 +25,10 @@ def generate_room_id(length=6):
     return ''.join(random.choice(characters) for _ in range(length))
 
 def extract_racers(url):
-    gall_id = None
-    gall_no = None
+    gall_id = None; gall_no = None
     parsed_url = urllib.parse.urlparse(url)
     qs = urllib.parse.parse_qs(parsed_url.query)
+    
     if 'id' in qs and 'no' in qs:
         gall_id = qs['id'][0]; gall_no = qs['no'][0]
     else:
@@ -58,8 +58,7 @@ def extract_racers(url):
         if match: e_s_n_o = match.group(1)
 
     ajax_url = "https://gall.dcinside.com/board/comment/"
-    ajax_headers = headers.copy()
-    ajax_headers["X-Requested-With"] = "XMLHttpRequest"
+    ajax_headers = headers.copy(); ajax_headers["X-Requested-With"] = "XMLHttpRequest"
     payload = {"id": gall_id, "no": gall_no, "cmt_id": gall_id, "cmt_no": gall_no, "e_s_n_o": e_s_n_o, "_GALLTYPE_": "G" if "mgallery" not in target_url else "M", "page": 1}
     
     try: cmt_data = session.post(ajax_url, data=payload, headers=ajax_headers).json()
@@ -83,7 +82,7 @@ def extract_only():
     return jsonify({"success": True, "participants": participants})
 
 # ==========================================
-# 🐎 [백엔드 코어] 기획서 완벽 반영 엔진
+# 🐎 [백엔드 코어] 우마무스메 물리 엔진
 # ==========================================
 FPS = 15
 DT = 1.0 / FPS
@@ -100,6 +99,7 @@ class Uma:
         self.id = uid; self.name = name; self.original_style = style; self.style = style 
         self.spd = raw_stats['spd'] * cond_mult; self.stam = raw_stats['stam'] * cond_mult
         self.pow = raw_stats['pow'] * cond_mult; self.guts = raw_stats['guts'] * cond_mult; self.intel = raw_stats['intel'] * cond_mult
+        
         self.track_len = track_len
         self.max_hp = 0.8 * STYLE_MODS[style]["hp"] * self.stam + track_len; self.hp = self.max_hp
         self.dist = 0.0; self.speed = 3.0; self.lane = start_lane; self.target_speed = 3.0
@@ -110,9 +110,7 @@ class Uma:
         self.is_start_dash = True; self.is_exhausted = False; self.is_spurting = False; self.is_kakari = False
         self.kakari_timer = 0; self.has_kakari_history = False
         
-        # 기획서 모드
-        self.pace_mode = "Normal"
-        self.pace_mode_mod = 1.0
+        self.pace_mode = "Normal"; self.pace_mode_mod = 1.0
         self.is_overtaking = False; self.overtake_timer = 0
         self.is_evading = False; self.evade_timer = 0
         self.active_states = []
@@ -146,11 +144,10 @@ class RaceSimulator:
             elif r.section <= 16: r.phase = 1
             else: r.phase = 2
 
-            # 💡 [핵심] 구간 진입 시 판정 (1~10구간 포지션킵 + 전구간 추월)
+            # 💡 [핵심] 구간 진입 시 판정
             if r.section > r.last_section_eval:
                 r.last_section_eval = r.section
-                r.pace_mode = "Normal"
-                r.pace_mode_mod = 1.0
+                r.pace_mode = "Normal"; r.pace_mode_mod = 1.0
                 
                 # 포지션 킵 (1~10 구간)
                 if r.section <= 10:
@@ -162,7 +159,7 @@ class RaceSimulator:
                         elif r.id == leader.id:
                             diff_2nd = leader.dist - max([o.dist for o in self.runners if o.id != leader.id] + [0])
                             limit = 12.5 if sum(1 for o in self.runners if o.style == "도주") == 1 else 4.5
-                            if diff_2nd <= limit and random.random() < (1.0 if r.is_kakari else (20 * math.log10(r.intel * 0.1))/100.0):
+                            if diff_2nd <= limit and random.random() < (1.0 if r.is_kakari else (20 * math.log10(max(r.intel, 1) * 0.1))/100.0):
                                 r.pace_mode = "PaceUp"; r.pace_mode_mod = 1.04
                         elif r.is_kakari:
                             r.pace_mode = "Chase"; r.pace_mode_mod = 1.05
@@ -176,10 +173,10 @@ class RaceSimulator:
                             lower = {"선행": 3.0, "선입": 6.5, "추입": 7.5}[r.style] * (self.race_mod if r.style != "선행" else 1.0)
                             if dist_diff < lower:
                                 r.pace_mode = "PaceDown"; r.pace_mode_mod = 0.915 if r.phase == 0 else 0.945
-                            elif dist_diff >= upper and random.random() < (1.0 if r.is_kakari else (15 * math.log10(r.intel * 0.1))/100.0):
+                            elif dist_diff >= upper and random.random() < (1.0 if r.is_kakari else (15 * math.log10(max(r.intel, 1) * 0.1))/100.0):
                                 r.pace_mode = "PaceUp"; r.pace_mode_mod = 1.04
 
-                # 추월 모드 판정
+                # 💡 [핵심] 추월 모드 및 도망 모드 판정 (새로운 확률 공식 적용)
                 if not r.is_overtaking:
                     for target in self.runners:
                         if target.id == r.id: continue
@@ -190,15 +187,17 @@ class RaceSimulator:
                             target_blocked = any(o.id != target.id and 0 < o.dist - target.dist <= 2.0 and abs(o.lane - target.lane) <= 0.5 for o in self.runners)
                             
                             if (time_to_catch < 15.0 and r.target_speed > target.target_speed) or (target_blocked and r.target_speed > target.speed):
-                                if random.random() < max(100 - 9000 / r.intel, 20) / 100.0:
+                                prob = (20 * math.log10(max(r.intel, 1) * 0.1)) / 100.0
+                                if random.random() < prob:
                                     r.is_overtaking = True; r.overtake_timer = 1.5
-                                    if random.random() < max(100 - 9000 / target.intel, 20) / 100.0:
+                                    target_prob = (20 * math.log10(max(target.intel, 1) * 0.1)) / 100.0
+                                    if random.random() < target_prob:
                                         target.is_evading = True; target.evade_timer = 1.5
                                     break
 
-            # 흥분 상태
+            # 흥분 판정
             if 2 <= r.section <= 9 and not r.is_kakari and not r.has_kakari_history:
-                if random.random() < math.pow(6.5 / math.log10(0.1 * r.intel + 1), 2) / 100.0:
+                if random.random() < math.pow(6.5 / math.log10(max(r.intel, 1) * 0.1 + 1), 2) / 100.0:
                     r.is_kakari = True; r.has_kakari_history = True; r.kakari_timer = 12.0
             if r.is_kakari:
                 r.kakari_timer -= DT
@@ -213,7 +212,7 @@ class RaceSimulator:
                 r.evade_timer -= DT
                 if r.evade_timer <= 0: r.is_evading = False
 
-            # 속도 연산
+            # 목표 속도 산출
             t_mod = STYLE_MODS[r.style]["spd"][r.phase]
             base_target_speed = self.base_speed * t_mod
             spd_bonus = math.sqrt(500 * r.spd) * 0.002
@@ -222,6 +221,7 @@ class RaceSimulator:
             if r.phase == 2: base_target_speed += spd_bonus
             spurt_target = (base_target_speed + 0.01 * self.base_speed) * 1.05 + spd_bonus + guts_bonus
 
+            # 스퍼트 판정
             if r.hp <= 0 and not r.is_exhausted:
                 r.is_exhausted = True; r.is_spurting = False
             elif r.phase == 2 and not r.is_spurting and not r.is_exhausted:
@@ -229,7 +229,7 @@ class RaceSimulator:
                 req_hp = (((self.track_len - r.dist) - 60) / spurt_target) * ((20 * math.pow(spurt_target - self.base_speed + 12, 2) / 144.0) * guts_drain_mod)
                 if r.hp >= req_hp: r.is_spurting = True
 
-            # 모드 적용
+            # 모드 배율 최종 적용
             target_speed = base_target_speed * r.pace_mode_mod
             if r.is_overtaking: target_speed *= 1.05
             if r.is_evading: target_speed *= 1.04
@@ -238,6 +238,7 @@ class RaceSimulator:
             elif r.is_spurting: target_speed = spurt_target
             r.target_speed = target_speed
 
+            # 가속도 적용
             accel = math.sqrt(500 * r.pow) * 0.002 * STYLE_MODS[r.style]["acc"][r.phase]
             if r.is_spurting and r.pow > 1000:
                 accel += (0.05 + (r.pow - 1000) * 0.00015) * (0.8 if r.has_kakari_history else 1.0)
@@ -250,6 +251,7 @@ class RaceSimulator:
             if r.speed < target_speed: r.speed = min(r.speed + accel * DT, target_speed)
             elif r.speed > target_speed: r.speed = max(r.speed - decel * DT, target_speed)
 
+            # 스태미나 차감
             if not r.is_exhausted:
                 hp_drain = 20 * math.pow(r.speed - self.base_speed + 12, 2) / 144.0
                 hp_drain *= (1.6 if r.is_kakari else (0.6 if r.pace_mode == "PaceDown" else 1.0))
@@ -257,8 +259,11 @@ class RaceSimulator:
                 r.hp = max(0, r.hp - hp_drain * DT)
 
             r.dist += r.speed * DT
-            target_lane = max(0.0, min((r.lane + 0.28) if r.pace_mode == "PaceDown" else (r.lane - 0.08), 28.8))
+            
+            # 💡 [핵심] 레인은 0.0 ~ 1.5 범위 내에서만 움직이도록 철저히 통제합니다.
+            target_lane = max(0.0, min((r.lane + 0.18) if r.pace_mode == "PaceDown" else (r.lane - 0.05), 1.5))
             lane_move_speed = 0.02 * (0.3 + 0.001 * r.pow) * 1.5 * DT * 60
+            
             if r.lane < target_lane: r.lane = min(r.lane + lane_move_speed, target_lane)
             elif r.lane > target_lane: r.lane = max(r.lane - lane_move_speed, target_lane)
 
@@ -296,7 +301,9 @@ def create_room_final():
                 trans = min(random.randint(1, 20), 1200 - raw_stats[k1], raw_stats[k2] - 300)
                 if trans > 0: raw_stats[k1] += trans; raw_stats[k2] -= trans
         
-        runner = Uma(idx, p_name, style, raw_stats, random.choice([1.05, 1.02, 1.00, 0.98, 0.95]), track_len, 4.0 + (idx % 8) * 1.5)
+        # 💡 [핵심] 프론트엔드 프리쇼와 동일한 스폰 좌표(0.0 ~ 1.5)를 부여하여 텔레포트 및 튕김 현상 제거
+        start_lane = (idx % 8) * 0.15 
+        runner = Uma(idx, p_name, style, raw_stats, random.choice([1.05, 1.02, 1.00, 0.98, 0.95]), track_len, start_lane)
         runners.append(runner)
         
     ROOMS_DB[room_id] = {
