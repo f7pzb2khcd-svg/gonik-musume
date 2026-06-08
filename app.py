@@ -126,10 +126,10 @@ class Uma:
         
         self.pace_mode = "Normal"; self.pace_mode_mod = 1.0
         self.pace_eval_cd = 0.0
-        self.pacedown_target_set = False # 💡 1회성 페이스다운 타겟 플래그
+        self.pacedown_target_set = False 
         
         self.is_overtaking = False; self.overtake_timer = 0; self.overtake_target = None
-        self.overtake_target_lane = None # 💡 진동 방지용 추월 타겟 레인 잠금
+        self.overtake_target_lane = None 
         self.is_evading = False; self.evade_timer = 0
         self.overtake_eval_cd = 0.0
         
@@ -186,7 +186,6 @@ class RaceSimulator:
             elif r.section <= 16: r.phase = 1
             else: r.phase = 2
 
-            # 공간 점유 플래그 갱신
             r.is_blocked = False; r.is_contested = False; r.is_followed = False; r.is_nearby = False
             closest_blocker = None; min_block_dist = 999.0
             contesting_runners = []
@@ -214,7 +213,8 @@ class RaceSimulator:
 
             if r.pace_eval_cd > 0: 
                 r.pace_eval_cd -= DT
-                if r.pace_eval_cd <= 0: r.pace_mode = "Normal"; r.pace_mode_mod = 1.0
+                if r.pace_eval_cd <= 0:
+                    r.pace_mode = "Normal"; r.pace_mode_mod = 1.0
             
             if r.section > 10 and r.pace_mode in ["PaceDown", "PaceUp", "PaceUpEx", "Chase"]:
                 r.pace_mode = "Normal"; r.pace_mode_mod = 1.0; r.pace_eval_cd = 0.0
@@ -255,17 +255,18 @@ class RaceSimulator:
                 r.overtake_timer -= DT
                 if r.overtake_timer <= 0:
                     r.is_overtaking = False; r.overtake_eval_cd = 1.0; r.overtake_target = None
-                    r.overtake_target_lane = None # 💡 락온 해제
+                    r.overtake_target_lane = None 
             if r.is_evading:
                 r.evade_timer -= DT
                 if r.evade_timer <= 0: r.is_evading = False
             
             if r.section > 10 and r.overtake_eval_cd <= 0 and not r.is_overtaking:
                 if r.is_blocked and closest_blocker:
-                    r.is_overtaking = True; r.overtake_timer = 2.0; r.overtake_eval_cd = 3.0
+                    # 💡 추월 지속시간 1.5초로 수정
+                    r.is_overtaking = True; r.overtake_timer = 1.5; r.overtake_eval_cd = 2.5
                     r.overtake_target = closest_blocker 
                     target_prob = (20 * math.log10(max(closest_blocker.intel, 1) * 0.1)) / 100.0
-                    if random.random() < target_prob: closest_blocker.is_evading = True; closest_blocker.evade_timer = 2.0
+                    if random.random() < target_prob: closest_blocker.is_evading = True; closest_blocker.evade_timer = 1.5
                 else:
                     for target in self.runners:
                         if target.id == r.id: continue
@@ -276,10 +277,10 @@ class RaceSimulator:
                             if (time_to_catch < 15.0 and r.target_speed > target.target_speed) or (target.is_blocked and r.target_speed > target.speed):
                                 prob = (20 * math.log10(max(r.intel, 1) * 0.1)) / 100.0
                                 if random.random() < prob:
-                                    r.is_overtaking = True; r.overtake_timer = 2.0; r.overtake_eval_cd = 3.0
+                                    r.is_overtaking = True; r.overtake_timer = 1.5; r.overtake_eval_cd = 2.5
                                     r.overtake_target = target 
                                     target_prob = (20 * math.log10(max(target.intel, 1) * 0.1)) / 100.0
-                                    if random.random() < target_prob: target.is_evading = True; target.evade_timer = 2.0
+                                    if random.random() < target_prob: target.is_evading = True; target.evade_timer = 1.5
                                 else: r.overtake_eval_cd = 2.0
                                 break
 
@@ -390,7 +391,7 @@ class RaceSimulator:
             r.dist += r.speed * DT
             
             # ==========================================
-            # 💡 [지능형 레인 탐색(Pathfinding) AI 엔진 버그 픽스]
+            # 💡 [지능형 레인 탐색(Pathfinding) AI 엔진] 
             # ==========================================
             dist_to_target_lane = abs(r.lane - r.target_lane)
             is_lane_path_blocked = False
@@ -400,7 +401,6 @@ class RaceSimulator:
 
             if dist_to_target_lane <= 0.04 or is_lane_path_blocked:
                 
-                # 💡 추월 시 진동 방지: 한 번 정한 레인을 overtake 모드가 끝날 때까지 락온!
                 if r.is_overtaking and r.overtake_target:
                     if r.overtake_target_lane is None:
                         min_l, max_l = self.get_cluster_bounds(r.overtake_target)
@@ -420,13 +420,13 @@ class RaceSimulator:
                     if r.is_exhausted:
                         r.target_lane = r.lane 
                     elif r.pace_mode == "PaceDown":
-                        # 💡 무한 팽창 방지: 1회성 락온
                         if not r.pacedown_target_set:
                             r.target_lane = min(1.5, r.lane + 0.25)
                             r.pacedown_target_set = True
                     elif r.section >= 12 and r.lane > 0.4:
                         outer_lane_target = min(1.0, r.lane / 0.1) * 0.5 + random.uniform(0, 0.1)
-                        r.target_lane = min(r.lane + 0.05, outer_lane_target)
+                        # 💡 오타 수정 (0.05 -> 0.08)
+                        r.target_lane = min(r.lane + 0.08, outer_lane_target)
                     else:
                         inside_blockers = [o for o in self.runners if o.id != r.id and o.dist > r.dist and abs(o.lane - r.lane) <= (1.75 * 0.08) and o.lane <= r.lane]
                         if r.phase == 1 and inside_blockers:
@@ -438,14 +438,20 @@ class RaceSimulator:
                             else:
                                 r.target_lane = r.lane 
 
-            # 상태 초기화 방어코드
             if r.pace_mode != "PaceDown": r.pacedown_target_set = False
             if not r.is_overtaking: r.overtake_target_lane = None
 
             r.target_lane = max(0.0, min(r.target_lane, 1.5))
-            lane_move_speed = 0.02 * (0.3 + 0.001 * r.pow) * 1.5 * DT * 60
             
-            # 실제 이동 처리 (경합 시 물리적 블로킹)
+            # 💡 [부드러운 사선 방향 차선 변경(Steering) 로직 적용]
+            # 1초에 걸쳐 차선을 변경하도록 보간 속도 설정 (기존에는 너무 휙휙 꺾임)
+            time_to_change_lane = 1.0 # 1초에 걸쳐 이동
+            lane_move_speed = (abs(r.target_lane - r.lane) / time_to_change_lane) * DT
+            
+            # 최소 이동 속도 보장 (너무 느리게 이동하여 목표를 못 잡는 현상 방지)
+            min_steer_speed = 0.01 * DT * 60 
+            lane_move_speed = max(lane_move_speed, min_steer_speed)
+
             actual_move = 0.0
             if r.lane < r.target_lane:
                 if not any(o.lane > r.lane for o in contesting_runners):
