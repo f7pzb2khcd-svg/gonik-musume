@@ -406,7 +406,7 @@ class RaceSimulator:
                 if not skill["triggered"]:
                     if self.check_skill_conditions(r, skill):
                         skill["triggered"] = True
-                        r.active_states.append("SkillTrigger")
+                        r.active_states.append(f"SKILL|{skill['data']['name']}|{skill['data']['icon']}")
                         
                         for eff in skill["data"]["effects"]:
                             targets = []
