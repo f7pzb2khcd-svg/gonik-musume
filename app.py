@@ -1,14 +1,14 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import requests
-from bs4 import BeautifulSoup
-import urllib.parse
+import csv
 import re
 import string
 import random
 import time
 import math
-import csv
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import requests
+from bs4 import BeautifulSoup
+import urllib.parse
 
 app = Flask(__name__)
 CORS(app)
@@ -28,15 +28,19 @@ def extract_racers(url):
     gall_id = None; gall_no = None
     parsed_url = urllib.parse.urlparse(url)
     qs = urllib.parse.parse_qs(parsed_url.query)
+    
     if 'id' in qs and 'no' in qs:
         gall_id = qs['id'][0]; gall_no = qs['no'][0]
     else:
         match = re.search(r'/(?:board|mini|mgallery)/([^/?]+)/([^/?]+)', url)
         if match: gall_id = match.group(1); gall_no = match.group(2)
+            
     if not gall_id or not gall_no: return [], "URL 에러"
+
     target_url = url if "m.dcinside.com" not in url else f"https://gall.dcinside.com/board/view/?id={gall_id}&no={gall_no}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://gall.dcinside.com/"}
     session = requests.Session()
+    
     try:
         res = session.get(target_url, headers=headers, timeout=5)
         res.raise_for_status()
@@ -48,6 +52,7 @@ def extract_racers(url):
                 res = session.get(target_url, headers=headers, timeout=5)
                 res.raise_for_status()
     except Exception as e: return [], f"게시글 접속 오류: {e}"
+        
     e_s_n_o = ""
     soup = BeautifulSoup(res.text, 'html.parser')
     token_input = soup.find('input', {'id': 'e_s_n_o'})
@@ -55,22 +60,28 @@ def extract_racers(url):
     else:
         match = re.search(r'var\s+e_s_n_o\s*=\s*"([^"]+)"', res.text)
         if match: e_s_n_o = match.group(1)
+
     gall_type = "G"
     if "mgallery" in target_url or "mgallery" in res.url: gall_type = "M"
     elif "mini" in target_url or "mini" in res.url: gall_type = "MI"
+
     ajax_url = "https://gall.dcinside.com/board/comment/"
     ajax_headers = headers.copy(); ajax_headers["X-Requested-With"] = "XMLHttpRequest"; ajax_headers["Referer"] = res.url
     payload = {"id": gall_id, "no": gall_no, "cmt_id": gall_id, "cmt_no": gall_no, "e_s_n_o": e_s_n_o, "_GALLTYPE_": gall_type, "page": 1}
+    
     try: cmt_data = session.post(ajax_url, data=payload, headers=ajax_headers).json()
     except Exception as e: return [], f"댓글 API 실패: {e}"
+        
     racers = {} 
     if not cmt_data or "comments" not in cmt_data or not cmt_data["comments"]: return [], "댓글 없음"
+        
     for cmt in cmt_data["comments"]:
         if not isinstance(cmt, dict): continue
         uid = cmt.get("user_id", ""); nick = cmt.get("name", "ㅇㅇ"); reg_date = cmt.get("reg_date", "")
         if not uid: continue
         user_key = f"{nick}({uid})"
         if user_key not in racers: racers[user_key] = reg_date
+            
     return [{"name": k, "reg_date": v} for k, v in racers.items()], None
 
 @app.route('/api/extract_only', methods=['POST'])
@@ -81,18 +92,23 @@ def extract_only():
     return jsonify({"success": True, "participants": participants})
 
 # ==========================================
-# 📊 [스킬 데이터 파싱 엔진] 외부 CSV 파일 로드
+# 📊 [스킬 데이터 파싱 엔진]
 # ==========================================
 SKILL_DB = {}
 try:
     with open('skills.csv', 'r', encoding='utf-8-sig') as f:
         reader = csv.reader(f)
-        next(reader) 
+        next(reader) # 헤더 건너뛰기
         for row in reader:
-            if len(row) < 16: continue
-            s_id = row[0]
+            if not row or not row[0].strip(): continue
+            
+            # 💡 [핵심 버그 픽스] 엑셀 CSV 특성 상 빈 셀은 잘려서 배열 길이가 짧아지는 현상 완벽 방어
+            if len(row) < 16:
+                row.extend([''] * (16 - len(row)))
+                
+            s_id = row[0].strip()
             SKILL_DB[s_id] = {
-                "id": s_id, "name": row[1], "icon": row[2],
+                "id": s_id, "name": row[1].strip(), "icon": row[2].strip(),
                 "conditions": [c for c in row[3:7] if c.strip()],
                 "effects": []
             }
@@ -113,7 +129,7 @@ try:
                     dur = float(row[i+2]) if row[i+2].strip() else 0.0
                     SKILL_DB[s_id]["effects"].append({"target": target, "type": eff_type, "val": val, "dur": dur})
 except Exception as e:
-    print("skills.csv 파일 로드 실패:", e)
+    print("skills.csv 파일 로드 실패 (파일 경로 또는 형식을 확인하세요):", e)
 
 # ==========================================
 # 🐎 [백엔드 코어] 물리 엔진 및 AI 로직
@@ -121,6 +137,7 @@ except Exception as e:
 FPS = 15
 DT = 1.0 / FPS
 
+# 💡 스킬 판정에 필수적인 트랙 세그먼트 전역 변수! (이게 빠지면 NameError로 500 에러 발생)
 TRACK_SEGMENTS = [
     (0, 200, "straight"), (200, 400, "corner"), (400, 950, "straight"),
     (950, 1225, "corner"), (1225, 1475, "corner"), (1475, 2000, "straight")
@@ -184,7 +201,6 @@ class RaceSimulator:
         self.time = 0.0; self.frames = []; self.race_mod = 0.0008 * (track_len - 1000) + 1.0
         self.start_phase_cleared = False
         
-        # 💡 [시작 전 스킬 분배 및 발동 판정 완벽 개선판]
         UNIQUE_SKILLS = [s for s in SKILL_DB.values() if s['icon'] == '고유.png']
         COMMON_SKILLS = [s for s in SKILL_DB.values() if s['icon'] != '고유.png']
         
@@ -202,7 +218,6 @@ class RaceSimulator:
             for skill_data in candidate_skills:
                 prob = (20 * math.log10(max(r.intel, 1) * 0.1)) / 100.0
                 if random.random() < prob:
-                    # 💡 하드코딩 제거 & 동적 스케일링 적용 & 교집합 처리
                     cond_text = " ".join(skill_data["conditions"])
                     min_dist = 0.0; max_dist = self.track_len
                     sec_len = self.section_len
@@ -227,20 +242,17 @@ class RaceSimulator:
                     valid_ranges = []
                     if is_corner or is_straight:
                         for s, e, t in TRACK_SEGMENTS:
-                            # 트랙 길이에 맞게 지형을 스케일링
                             s_scaled = s * (self.track_len / 2000.0)
                             e_scaled = e * (self.track_len / 2000.0)
                             if is_corner and t != "corner": continue
                             if is_straight and t != "straight": continue
                             
-                            # 구간 필터와 지형 필터의 교집합 계산!
                             ns = max(s_scaled, min_dist)
                             ne = min(e_scaled, max_dist)
                             if ns < ne: valid_ranges.append((ns, ne))
                     else:
                         if min_dist < max_dist: valid_ranges.append((min_dist, max_dist))
 
-                    # 💡 "진입" 같이 순간적인 트리거는 무작위 거리 예약을 하지 않고(-1) 도착 순간 발동시킴
                     if "무작위" in cond_text and "진입" not in cond_text and valid_ranges:
                         chosen = random.choice(valid_ranges)
                         target_dist = random.uniform(chosen[0], chosen[1])
@@ -251,6 +263,12 @@ class RaceSimulator:
                         "id": skill_data["id"], "data": skill_data,
                         "triggered": False, "target_dist": target_dist
                     })
+
+    def run(self):
+        safety = 0
+        while any(r.dist < self.track_len for r in self.runners) and safety < 30000:
+            self.tick(); self.time += DT; safety += 1
+        return self.frames
 
     def get_cluster_bounds(self, center_runner):
         visited = set([center_runner.id])
@@ -276,8 +294,6 @@ class RaceSimulator:
         if skill["target_dist"] >= 0 and r.dist < skill["target_dist"]: return False
         
         data = skill["data"]
-        cond_text = " ".join(data["conditions"])
-        
         for c in data["conditions"]:
             if "초반" in c and r.phase != 0: return False
             if "중반 이후" in c and r.phase < 1: return False
@@ -291,7 +307,6 @@ class RaceSimulator:
             match = re.search(r'(\d+)구간 진입', c)
             if match and r.section != int(match.group(1)): return False
             
-            # 💡 [지형 중앙 통제] TRACK_SEGMENTS를 기반으로 런타임 현재 지형 판정
             scale = self.track_len / 2000.0
             is_corner = any(s * scale <= r.dist <= e * scale for s, e, t in TRACK_SEGMENTS if t == "corner")
             is_straight = not is_corner
@@ -334,12 +349,12 @@ class RaceSimulator:
             if "추월모드" in c and not r.is_overtaking: return False
             
             if "순위" in c:
-                rank_pct = r.rank / len(self.runners)
+                rank_pct = r.rank / max(len(self.runners), 1)
                 match = re.search(r'(\d+)%', c)
                 if match:
                     val = int(match.group(1)) / 100.0
-                    if "이하" in c and rank_pct > val: return False # 50% 이하 = 상위 50%
-                    if "이상" in c and rank_pct < val: return False # 50% 이상 = 하위 50%
+                    if "이하" in c and rank_pct > val: return False 
+                    if "이상" in c and rank_pct < val: return False 
                     if "~" in c:
                         match2 = re.findall(r'(\d+)%', c)
                         if len(match2) == 2:
@@ -396,9 +411,6 @@ class RaceSimulator:
             else: r.time_followed = 0
             if r.dist > 1475: r.time_in_final_straight += DT
 
-            # ==========================================
-            # 💡 [스킬 발동 및 효과 분배 엔진]
-            # ==========================================
             r.pow = r.base_pow; r.guts = r.base_guts
             r.skill_mod_target_speed = 0.0; r.skill_mod_accel = 0.0
             
