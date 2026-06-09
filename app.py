@@ -8,6 +8,7 @@ import string
 import random
 import time
 import math
+import csv
 
 app = Flask(__name__)
 CORS(app)
@@ -27,19 +28,15 @@ def extract_racers(url):
     gall_id = None; gall_no = None
     parsed_url = urllib.parse.urlparse(url)
     qs = urllib.parse.parse_qs(parsed_url.query)
-    
     if 'id' in qs and 'no' in qs:
         gall_id = qs['id'][0]; gall_no = qs['no'][0]
     else:
         match = re.search(r'/(?:board|mini|mgallery)/([^/?]+)/([^/?]+)', url)
         if match: gall_id = match.group(1); gall_no = match.group(2)
-            
     if not gall_id or not gall_no: return [], "URL 에러"
-
     target_url = url if "m.dcinside.com" not in url else f"https://gall.dcinside.com/board/view/?id={gall_id}&no={gall_no}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://gall.dcinside.com/"}
     session = requests.Session()
-    
     try:
         res = session.get(target_url, headers=headers, timeout=5)
         res.raise_for_status()
@@ -51,7 +48,6 @@ def extract_racers(url):
                 res = session.get(target_url, headers=headers, timeout=5)
                 res.raise_for_status()
     except Exception as e: return [], f"게시글 접속 오류: {e}"
-        
     e_s_n_o = ""
     soup = BeautifulSoup(res.text, 'html.parser')
     token_input = soup.find('input', {'id': 'e_s_n_o'})
@@ -59,28 +55,22 @@ def extract_racers(url):
     else:
         match = re.search(r'var\s+e_s_n_o\s*=\s*"([^"]+)"', res.text)
         if match: e_s_n_o = match.group(1)
-
     gall_type = "G"
     if "mgallery" in target_url or "mgallery" in res.url: gall_type = "M"
     elif "mini" in target_url or "mini" in res.url: gall_type = "MI"
-
     ajax_url = "https://gall.dcinside.com/board/comment/"
     ajax_headers = headers.copy(); ajax_headers["X-Requested-With"] = "XMLHttpRequest"; ajax_headers["Referer"] = res.url
     payload = {"id": gall_id, "no": gall_no, "cmt_id": gall_id, "cmt_no": gall_no, "e_s_n_o": e_s_n_o, "_GALLTYPE_": gall_type, "page": 1}
-    
     try: cmt_data = session.post(ajax_url, data=payload, headers=ajax_headers).json()
     except Exception as e: return [], f"댓글 API 실패: {e}"
-        
     racers = {} 
     if not cmt_data or "comments" not in cmt_data or not cmt_data["comments"]: return [], "댓글 없음"
-        
     for cmt in cmt_data["comments"]:
         if not isinstance(cmt, dict): continue
         uid = cmt.get("user_id", ""); nick = cmt.get("name", "ㅇㅇ"); reg_date = cmt.get("reg_date", "")
         if not uid: continue
         user_key = f"{nick}({uid})"
         if user_key not in racers: racers[user_key] = reg_date
-            
     return [{"name": k, "reg_date": v} for k, v in racers.items()], None
 
 @app.route('/api/extract_only', methods=['POST'])
@@ -91,10 +81,50 @@ def extract_only():
     return jsonify({"success": True, "participants": participants})
 
 # ==========================================
+# 📊 [스킬 데이터 파싱 엔진] 외부 CSV 파일 로드
+# ==========================================
+SKILL_DB = {}
+try:
+    with open('skills.csv', 'r', encoding='utf-8-sig') as f:
+        reader = csv.reader(f)
+        next(reader) 
+        for row in reader:
+            if len(row) < 16: continue
+            s_id = row[0]
+            SKILL_DB[s_id] = {
+                "id": s_id, "name": row[1], "icon": row[2],
+                "conditions": [c for c in row[3:7] if c.strip()],
+                "effects": []
+            }
+            for i in range(7, 16, 3):
+                if row[i].strip():
+                    target = "self"
+                    eff_type = row[i].strip()
+                    if "근처에 있는 주자" in eff_type: target = "nearby"; eff_type = eff_type.replace("근처에 있는 주자 ", "")
+                    elif "앞에 있는 주자" in eff_type: target = "front"; eff_type = eff_type.replace("앞에 있는 주자 ", "")
+                    elif "뒤에 있는 주자" in eff_type: target = "behind"; eff_type = eff_type.replace("뒤에 있는 주자 ", "")
+                    elif "옆에 있는 주자" in eff_type: target = "side"; eff_type = eff_type.replace("옆에 있는 주자 ", "")
+                    elif "나를 제외한 주자" in eff_type: target = "all_enemies"; eff_type = eff_type.replace("나를 제외한 주자 ", "")
+                    
+                    if eff_type == "속도 증가": eff_type = "목표 속도 증가"
+                    if eff_type == "속도 감소": eff_type = "목표 속도 감소"
+
+                    val = float(row[i+1]) if row[i+1].strip() else 0.0
+                    dur = float(row[i+2]) if row[i+2].strip() else 0.0
+                    SKILL_DB[s_id]["effects"].append({"target": target, "type": eff_type, "val": val, "dur": dur})
+except Exception as e:
+    print("skills.csv 파일 로드 실패:", e)
+
+# ==========================================
 # 🐎 [백엔드 코어] 물리 엔진 및 AI 로직
 # ==========================================
 FPS = 15
 DT = 1.0 / FPS
+
+TRACK_SEGMENTS = [
+    (0, 200, "straight"), (200, 400, "corner"), (400, 950, "straight"),
+    (950, 1225, "corner"), (1225, 1475, "corner"), (1475, 2000, "straight")
+]
 
 STYLE_MODS = {
     "도주": {"spd": [1.000, 0.980, 0.962], "acc": [1.000, 1.000, 0.996], "hp": 0.95},
@@ -106,8 +136,11 @@ STYLE_MODS = {
 class Uma:
     def __init__(self, uid, name, style, raw_stats, cond_mult, track_len, start_lane, start_dist):
         self.id = uid; self.name = name; self.original_style = style; self.style = style 
-        self.spd = raw_stats['spd'] * cond_mult; self.stam = raw_stats['stam'] * cond_mult
-        self.pow = raw_stats['pow'] * cond_mult; self.guts = raw_stats['guts'] * cond_mult; self.intel = raw_stats['intel'] * cond_mult
+        self.base_spd = raw_stats['spd'] * cond_mult; self.spd = self.base_spd
+        self.base_stam = raw_stats['stam'] * cond_mult; self.stam = self.base_stam
+        self.base_pow = raw_stats['pow'] * cond_mult; self.pow = self.base_pow
+        self.base_guts = raw_stats['guts'] * cond_mult; self.guts = self.base_guts
+        self.intel = raw_stats['intel'] * cond_mult
         
         self.track_len = track_len
         self.max_hp = 0.8 * STYLE_MODS[style]["hp"] * self.stam + track_len; self.hp = self.max_hp
@@ -115,7 +148,7 @@ class Uma:
         self.target_lane = start_lane
         
         self.start_delay = math.floor(random.uniform(0, 0.1) / DT) * DT 
-        self.section = 1; self.phase = 0
+        self.section = 1; self.phase = 0; self.rank = 1
         self.is_start_dash = True; self.is_exhausted = False; self.is_spurting = False
         
         intel_bonus = max(self.intel, 1) * 0.1
@@ -124,23 +157,24 @@ class Uma:
         self.kakari_target_section = random.randint(2, 9) if self.is_kakari_planned else 0
         self.is_kakari = False; self.kakari_timer = 0; self.has_kakari_history = False
         
-        self.pace_mode = "Normal"; self.pace_mode_mod = 1.0
-        self.pace_eval_cd = 0.0
-        self.pacedown_target_set = False 
+        self.pace_mode = "Normal"; self.pace_mode_mod = 1.0; self.pace_eval_cd = 0.0
+        self.pacedown_target_set = False; self.pace_activation_section = 0; self.pace_target_dist = 0.0
+        self.is_pace_eval_passed = set() 
         
-        self.pace_activation_section = 0 # 💡 조건부 종료를 위한 발동 구간 기록
-        self.pace_target_dist = 0.0 # 💡 upper~lower 랜덤 타겟 위치 저장
-        self.is_pace_eval_passed = set() # 💡 각 구간별 판정 1회 제어용
-        
-        self.is_overtaking = False; self.overtake_timer = 0; self.overtake_target = None
-        self.overtake_target_lane = None 
-        self.is_evading = False; self.evade_timer = 0
-        self.overtake_eval_cd = 0.0
+        self.is_overtaking = False; self.overtake_timer = 0; self.overtake_target = None; self.overtake_target_lane = None 
+        self.is_evading = False; self.evade_timer = 0; self.overtake_eval_cd = 0.0
         
         self.is_blocked = False; self.is_contested = False; self.is_followed = False; self.is_nearby = False
+        self.time_blocked = 0.0; self.time_contested = 0.0; self.time_followed = 0.0; self.time_in_final_straight = 0.0
         
+        self.bump_cd = 0.0 
         self.stam_sys_cd = 0.0; self.stam_sys_active = None; self.stam_sys_timer = 0.0
         self.active_states = []
+        
+        self.owned_skills = []   
+        self.active_skills = []  
+        self.skill_mod_target_speed = 0.0
+        self.skill_mod_accel = 0.0
 
 class RaceSimulator:
     def __init__(self, runners, track_len):
@@ -149,48 +183,182 @@ class RaceSimulator:
         self.base_speed = max(16.0, 20.0 - ((track_len - 2000) / 1000.0))
         self.time = 0.0; self.frames = []; self.race_mod = 0.0008 * (track_len - 1000) + 1.0
         self.start_phase_cleared = False
-
-    def run(self):
-        safety = 0
-        while any(r.dist < self.track_len for r in self.runners) and safety < 30000:
-            self.tick(); self.time += DT; safety += 1
-        return self.frames
         
+        # 💡 [시작 전 스킬 분배 및 발동 판정 완벽 개선판]
+        UNIQUE_SKILLS = [s for s in SKILL_DB.values() if s['icon'] == '고유.png']
+        COMMON_SKILLS = [s for s in SKILL_DB.values() if s['icon'] != '고유.png']
+        
+        for r in self.runners:
+            unique_count = 0
+            if r.intel >= 1000: unique_count = 4
+            elif r.intel >= 900: unique_count = 3
+            elif r.intel >= 825: unique_count = 2
+            elif r.intel >= 750: unique_count = 1
+            
+            selected_uniques = random.sample(UNIQUE_SKILLS, min(unique_count, len(UNIQUE_SKILLS)))
+            selected_commons = random.sample(COMMON_SKILLS, min(8, len(COMMON_SKILLS)))
+            candidate_skills = selected_uniques + selected_commons
+            
+            for skill_data in candidate_skills:
+                prob = (20 * math.log10(max(r.intel, 1) * 0.1)) / 100.0
+                if random.random() < prob:
+                    # 💡 하드코딩 제거 & 동적 스케일링 적용 & 교집합 처리
+                    cond_text = " ".join(skill_data["conditions"])
+                    min_dist = 0.0; max_dist = self.track_len
+                    sec_len = self.section_len
+                    
+                    if "초반" in cond_text: max_dist = min(max_dist, self.track_len / 6.0)
+                    if "중반 이후" in cond_text: min_dist = max(min_dist, self.track_len / 6.0)
+                    elif "중반" in cond_text: min_dist = max(min_dist, self.track_len / 6.0); max_dist = min(max_dist, self.track_len * (16.0 / 24.0))
+                    if "종반" in cond_text: min_dist = max(min_dist, self.track_len * (16.0 / 24.0))
+                    if "10구간 이전" in cond_text: max_dist = min(max_dist, 10.0 * sec_len)
+                    
+                    match_after = re.search(r'(\d+)구간 이후', cond_text)
+                    if match_after: min_dist = max(min_dist, (int(match_after.group(1)) - 1) * sec_len)
+                    
+                    match_range = re.search(r'(\d+)구간~(\d+)구간 무작위', cond_text)
+                    if match_range:
+                        min_dist = max(min_dist, (int(match_range.group(1)) - 1) * sec_len)
+                        max_dist = min(max_dist, int(match_range.group(2)) * sec_len)
+                        
+                    is_corner = "무작위 코너" in cond_text
+                    is_straight = "무작위 직선" in cond_text
+
+                    valid_ranges = []
+                    if is_corner or is_straight:
+                        for s, e, t in TRACK_SEGMENTS:
+                            # 트랙 길이에 맞게 지형을 스케일링
+                            s_scaled = s * (self.track_len / 2000.0)
+                            e_scaled = e * (self.track_len / 2000.0)
+                            if is_corner and t != "corner": continue
+                            if is_straight and t != "straight": continue
+                            
+                            # 구간 필터와 지형 필터의 교집합 계산!
+                            ns = max(s_scaled, min_dist)
+                            ne = min(e_scaled, max_dist)
+                            if ns < ne: valid_ranges.append((ns, ne))
+                    else:
+                        if min_dist < max_dist: valid_ranges.append((min_dist, max_dist))
+
+                    # 💡 "진입" 같이 순간적인 트리거는 무작위 거리 예약을 하지 않고(-1) 도착 순간 발동시킴
+                    if "무작위" in cond_text and "진입" not in cond_text and valid_ranges:
+                        chosen = random.choice(valid_ranges)
+                        target_dist = random.uniform(chosen[0], chosen[1])
+                    else:
+                        target_dist = -1
+                        
+                    r.owned_skills.append({
+                        "id": skill_data["id"], "data": skill_data,
+                        "triggered": False, "target_dist": target_dist
+                    })
+
     def get_cluster_bounds(self, center_runner):
         visited = set([center_runner.id])
         queue = [center_runner]
-        min_lane = center_runner.lane
-        max_lane = center_runner.lane
-        
+        min_lane = center_runner.lane; max_lane = center_runner.lane
         while queue:
             curr = queue.pop(0)
             for o in self.runners:
-                if o.id in visited: continue
+                if o.id in visited or o.bump_cd > 0: continue 
                 if abs(o.dist - curr.dist) <= 3.0 and abs(o.lane - curr.lane) <= (2 * 0.08):
-                    visited.add(o.id)
-                    queue.append(o)
+                    visited.add(o.id); queue.append(o)
                     if o.lane < min_lane: min_lane = o.lane
                     if o.lane > max_lane: max_lane = o.lane
         return min_lane, max_lane
 
     def get_pacemaker(self):
-        # 도주 -> 선행 -> 선입 -> 추입 순으로 가장 앞선 주자를 찾음
         for style in ["도주", "선행", "선입", "추입"]:
             group = [r for r in self.runners if r.style == style]
-            if group:
-                return max(group, key=lambda x: x.dist)
+            if group: return max(group, key=lambda x: x.dist)
         return max(self.runners, key=lambda x: x.dist)
+
+    def check_skill_conditions(self, r, skill):
+        if skill["target_dist"] >= 0 and r.dist < skill["target_dist"]: return False
+        
+        data = skill["data"]
+        cond_text = " ".join(data["conditions"])
+        
+        for c in data["conditions"]:
+            if "초반" in c and r.phase != 0: return False
+            if "중반 이후" in c and r.phase < 1: return False
+            elif "중반" in c and r.phase != 1: return False
+            if "종반" in c and r.phase != 2: return False
+            
+            match = re.search(r'(\d+)구간 이후', c)
+            if match and r.section < int(match.group(1)): return False
+            match = re.search(r'(\d+)구간 이전', c)
+            if match and r.section > int(match.group(1)): return False
+            match = re.search(r'(\d+)구간 진입', c)
+            if match and r.section != int(match.group(1)): return False
+            
+            # 💡 [지형 중앙 통제] TRACK_SEGMENTS를 기반으로 런타임 현재 지형 판정
+            scale = self.track_len / 2000.0
+            is_corner = any(s * scale <= r.dist <= e * scale for s, e, t in TRACK_SEGMENTS if t == "corner")
+            is_straight = not is_corner
+            is_final_corner = (1225 * scale <= r.dist <= 1475 * scale)
+            is_final_straight = (r.dist > 1475 * scale)
+            
+            if "코너 진입" in c and not (is_corner and r.dist - r.speed * DT * 15 < 200 * scale): return False
+            if "최종 코너 진입" in c and not (is_final_corner and r.dist - r.speed * DT * 15 < 1225 * scale): return False
+            if "최종 직선 진입" in c and not (is_final_straight and r.dist - r.speed * DT * 15 < 1475 * scale): return False
+            if "직선 진입" in c and not (is_straight and r.dist - r.speed * DT * 15 < 400 * scale): return False
+            
+            if "무작위 코너" in c and not is_corner: return False
+            if "무작위 직선" in c and not is_straight: return False
+            if "최종 코너" in c and "진입" not in c and not is_final_corner: return False
+            if "최종 직선" in c and "진입" not in c and not is_final_straight: return False
+            
+            if "근처에 주자" in c:
+                if "둘 이상" in c:
+                    nearby_count = sum(1 for o in self.runners if o.id != r.id and abs(o.dist - r.dist) <= 3.0 and abs(o.lane - r.lane) <= (3.0 * 0.08))
+                    if nearby_count < 2: return False
+                elif not r.is_nearby: return False
+            
+            if "앞이 가로막힘" in c:
+                if "2초" in c and r.time_blocked < 2.0: return False
+                elif r.time_blocked < 0.1: return False
+            
+            if "옆이 가로막힘" in c:
+                if "5초" in c and r.time_contested < 5.0: return False
+                elif "2초" in c and r.time_contested < 2.0: return False
+                elif r.time_contested < 0.1: return False
+                
+            if "바로 뒤에 주자" in c and "2초" in c:
+                if r.time_followed < 2.0: return False
+                
+            if "둘러싸임" in c:
+                if not (r.is_blocked and r.is_contested and r.is_followed): return False
+            if "앞이 가로막히지 않음" in c and r.is_blocked: return False
+            if "최종 직선 진입 후 5초 이상" in c and r.time_in_final_straight < 5.0: return False
+            if "레인 0.4 이내" in c and r.lane > 0.4: return False
+            if "추월모드" in c and not r.is_overtaking: return False
+            
+            if "순위" in c:
+                rank_pct = r.rank / len(self.runners)
+                match = re.search(r'(\d+)%', c)
+                if match:
+                    val = int(match.group(1)) / 100.0
+                    if "이하" in c and rank_pct > val: return False # 50% 이하 = 상위 50%
+                    if "이상" in c and rank_pct < val: return False # 50% 이상 = 하위 50%
+                    if "~" in c:
+                        match2 = re.findall(r'(\d+)%', c)
+                        if len(match2) == 2:
+                            v1, v2 = int(match2[0])/100.0, int(match2[1])/100.0
+                            if not (v1 <= rank_pct <= v2): return False
+                if "위 이내" in c:
+                    match = re.search(r'(\d+)위', c)
+                    if match and r.rank > int(match.group(1)): return False
+        return True
 
     def tick(self):
         current_frame = {"t": round(self.time, 2), "r": []}
-
-        # 💡 [페이스메이커 2초 딜레이 오픈 로직]
-        pacemaker = None
-        if self.time >= 2.0 or any(r.dist >= self.section_len for r in self.runners):
-            self.start_phase_cleared = True
         
-        if self.start_phase_cleared:
-            pacemaker = self.get_pacemaker()
+        sorted_runners = sorted(self.runners, key=lambda x: x.dist, reverse=True)
+        for i, r in enumerate(sorted_runners): r.rank = i + 1
+            
+        pacemaker = None
+        if self.time >= 2.0 or any(r.dist >= self.section_len for r in self.runners): self.start_phase_cleared = True
+        if self.start_phase_cleared: pacemaker = self.get_pacemaker()
 
         for r in self.runners:
             if r.dist >= self.track_len: continue
@@ -211,17 +379,60 @@ class RaceSimulator:
 
             for o in self.runners:
                 if o.id == r.id: continue
-                dist_diff = o.dist - r.dist
-                lane_diff = abs(o.lane - r.lane)
+                dist_diff = o.dist - r.dist; lane_diff = abs(o.lane - r.lane)
 
                 if 0 < dist_diff <= 2.0 and lane_diff <= (0.5 * 0.08):
                     r.is_blocked = True
-                    if dist_diff < min_block_dist:
-                        min_block_dist = dist_diff; closest_blocker = o
-                if abs(dist_diff) <= 1.0 and lane_diff <= (2.0 * 0.08):
-                    r.is_contested = True; contesting_runners.append(o)
+                    if dist_diff < min_block_dist: min_block_dist = dist_diff; closest_blocker = o
+                if abs(dist_diff) <= 1.0 and lane_diff <= (2.0 * 0.08): r.is_contested = True; contesting_runners.append(o)
                 if 0 < -dist_diff <= 2.5 and lane_diff <= (1.0 * 0.08): r.is_followed = True
                 if abs(dist_diff) <= 3.0 and lane_diff <= (3.0 * 0.08): r.is_nearby = True
+
+            if r.is_blocked: r.time_blocked += DT
+            else: r.time_blocked = 0
+            if r.is_contested: r.time_contested += DT
+            else: r.time_contested = 0
+            if r.is_followed: r.time_followed += DT
+            else: r.time_followed = 0
+            if r.dist > 1475: r.time_in_final_straight += DT
+
+            # ==========================================
+            # 💡 [스킬 발동 및 효과 분배 엔진]
+            # ==========================================
+            r.pow = r.base_pow; r.guts = r.base_guts
+            r.skill_mod_target_speed = 0.0; r.skill_mod_accel = 0.0
+            
+            for skill in r.owned_skills:
+                if not skill["triggered"]:
+                    if self.check_skill_conditions(r, skill):
+                        skill["triggered"] = True
+                        r.active_states.append("SkillTrigger")
+                        
+                        for eff in skill["data"]["effects"]:
+                            targets = []
+                            if eff["target"] == "self": targets = [r]
+                            elif eff["target"] == "nearby": targets = [o for o in self.runners if o.id != r.id and abs(o.dist - r.dist) <= 3.0 and abs(o.lane - r.lane) <= (3.0 * 0.08)]
+                            elif eff["target"] == "front": targets = [o for o in self.runners if o.id != r.id and 0 < o.dist - r.dist <= 3.0]
+                            elif eff["target"] == "behind": targets = [o for o in self.runners if o.id != r.id and 0 < r.dist - o.dist <= 3.0]
+                            elif eff["target"] == "side": targets = [o for o in self.runners if o.id != r.id and abs(o.dist - r.dist) <= 1.0 and abs(o.lane - r.lane) <= (2.0 * 0.08)]
+                            elif eff["target"] == "all_enemies": targets = [o for o in self.runners if o.id != r.id]
+
+                            for t in targets:
+                                if eff["type"] == "지구력 회복": t.hp = min(t.hp + t.max_hp * (eff["val"]/100.0), t.max_hp)
+                                elif eff["type"] == "지구력 감소": t.hp = max(0, t.hp + t.max_hp * (eff["val"]/100.0))
+                                elif eff["type"] == "현재 속도 증가": t.speed += eff["val"]
+                                else: t.active_skills.append({"type": eff["type"], "val": eff["val"], "dur": eff["dur"]})
+
+            alive_skills = []
+            for askill in r.active_skills:
+                if askill["type"] == "목표 속도 증가" or askill["type"] == "목표 속도 감소": r.skill_mod_target_speed += askill["val"]
+                elif askill["type"] == "가속도 증가" or askill["type"] == "가속도 감소": r.skill_mod_accel += askill["val"]
+                elif askill["type"] == "파워 증가" or askill["type"] == "파워 감소": r.pow += askill["val"]
+                elif askill["type"] == "근성 증가" or askill["type"] == "근성 감소": r.guts += askill["val"]
+                askill["dur"] -= DT
+                if askill["dur"] > 0: alive_skills.append(askill)
+            r.active_skills = alive_skills
+
 
             if r.section == r.kakari_target_section and not r.has_kakari_history:
                 r.is_kakari = True; r.has_kakari_history = True; r.kakari_timer = 12.0
@@ -230,10 +441,8 @@ class RaceSimulator:
                 if r.kakari_timer % 3.0 < DT and random.random() < 0.55: r.kakari_timer = 0
                 if r.kakari_timer <= 0: r.is_kakari = False; r.style = r.original_style
 
-            # 💡 [페이스 킵 모드 조건부 종료 로직]
             if r.pace_eval_cd > 0: r.pace_eval_cd -= DT
-            if r.section > 10 and r.pace_mode != "Normal":
-                r.pace_mode = "Normal"; r.pace_mode_mod = 1.0; r.pace_eval_cd = 0.0
+            if r.section > 10 and r.pace_mode != "Normal": r.pace_mode = "Normal"; r.pace_mode_mod = 1.0; r.pace_eval_cd = 0.0
                 
             if r.pace_mode != "Normal" and pacemaker:
                 terminate = False
@@ -254,17 +463,13 @@ class RaceSimulator:
                 elif r.pace_mode == "PaceDown":
                     if dist_to_pm <= r.pace_target_dist: terminate = True
 
-                if terminate:
-                    r.pace_mode = "Normal"; r.pace_mode_mod = 1.0; r.pace_eval_cd = 1.0 # 종료 후 1초 쿨다운
+                if terminate: r.pace_mode = "Normal"; r.pace_mode_mod = 1.0; r.pace_eval_cd = 1.0 
 
-            # 💡 [페이스 킵 발동 판정] 각 구간 진입 시 1회 판정 (페이스메이커 있을 때만)
             if pacemaker and r.section <= 10 and r.pace_eval_cd <= 0 and r.pace_mode == "Normal":
                 if r.section not in r.is_pace_eval_passed:
                     r.is_pace_eval_passed.add(r.section)
-                    
                     is_escape = (r.style == "도주" or (pacemaker.style != "도주" and r.id == pacemaker.id))
                     activated = False
-                    
                     if is_escape:
                         behind_strats = {"도주": ["선행", "선입", "추입"], "선행": ["선입", "추입"], "선입": ["추입"], "추입": []}
                         if any(o.dist > r.dist and o.style in behind_strats[r.style] for o in self.runners):
@@ -273,12 +478,10 @@ class RaceSimulator:
                             diff_2nd = pacemaker.dist - max([o.dist for o in self.runners if o.id != pacemaker.id] + [0])
                             limit = 12.5 if sum(1 for o in self.runners if o.style == "도주") == 1 else 4.5
                             if diff_2nd <= limit:
-                                if random.random() < (1.0 if r.is_kakari else (20 * math.log10(max(r.intel, 1) * 0.1))/100.0):
-                                    r.pace_mode = "PaceUp"; r.pace_mode_mod = 1.04; activated = True
+                                if random.random() < (1.0 if r.is_kakari else (20 * math.log10(max(r.intel, 1) * 0.1))/100.0): r.pace_mode = "PaceUp"; r.pace_mode_mod = 1.04; activated = True
                                 else: r.pace_eval_cd = 2.0
                         elif r.id != pacemaker.id: 
-                            if random.random() < (1.0 if r.is_kakari else (20 * math.log10(max(r.intel, 1) * 0.1))/100.0):
-                                r.pace_mode = "Chase"; r.pace_mode_mod = 1.05; activated = True
+                            if random.random() < (1.0 if r.is_kakari else (20 * math.log10(max(r.intel, 1) * 0.1))/100.0): r.pace_mode = "Chase"; r.pace_mode_mod = 1.05; activated = True
                             else: r.pace_eval_cd = 2.0
                     else:
                         behind_strats = {"선행": ["선입", "추입"], "선입": ["추입"], "추입": []}
@@ -288,25 +491,18 @@ class RaceSimulator:
                             dist_diff = pacemaker.dist - r.dist
                             upper = {"선행": 5.0, "선입": 7.0, "추입": 8.0}.get(r.style, 999) * self.race_mod
                             lower = {"선행": 3.0, "선입": 6.5, "추입": 7.5}.get(r.style, 0) * (self.race_mod if r.style != "선행" else 1.0)
-                            
                             if dist_diff < lower:
                                 r.pace_mode = "PaceDown"; r.pace_mode_mod = 0.915 if r.phase == 0 else 0.945; activated = True
                                 r.pace_target_dist = random.uniform(lower, upper)
                             elif dist_diff >= upper:
-                                if random.random() < (1.0 if r.is_kakari else (15 * math.log10(max(r.intel, 1) * 0.1))/100.0):
-                                    r.pace_mode = "PaceUp"; r.pace_mode_mod = 1.04; activated = True
-                                    r.pace_target_dist = random.uniform(lower, upper)
+                                if random.random() < (1.0 if r.is_kakari else (15 * math.log10(max(r.intel, 1) * 0.1))/100.0): r.pace_mode = "PaceUp"; r.pace_mode_mod = 1.04; activated = True; r.pace_target_dist = random.uniform(lower, upper)
                                 else: r.pace_eval_cd = 2.0
-                                    
-                    if activated:
-                        r.pace_activation_section = r.section
+                    if activated: r.pace_activation_section = r.section
 
-            # 추월 모드 판정 
             if r.overtake_eval_cd > 0: r.overtake_eval_cd -= DT
             if r.is_overtaking:
                 r.overtake_timer -= DT
-                if r.overtake_timer <= 0:
-                    r.is_overtaking = False; r.overtake_eval_cd = 1.0; r.overtake_target = None; r.overtake_target_lane = None 
+                if r.overtake_timer <= 0: r.is_overtaking = False; r.overtake_eval_cd = 1.0; r.overtake_target = None; r.overtake_target_lane = None 
             if r.is_evading:
                 r.evade_timer -= DT
                 if r.evade_timer <= 0: r.is_evading = False
@@ -334,7 +530,6 @@ class RaceSimulator:
                                 else: r.overtake_eval_cd = 2.0
                                 break
 
-            # 스태미나 스킬
             stam_speed_mod = 0.0
             if r.stam_sys_cd > 0: r.stam_sys_cd -= DT
             if 11 <= r.section <= 15 and r.stam_sys_cd <= 0 and not r.stam_sys_active:
@@ -390,8 +585,7 @@ class RaceSimulator:
             guts_bonus = math.pow(450 * r.guts, 0.597) * 0.0001
             spurt_target = (self.base_speed * STYLE_MODS[r.style]["spd"][2] + 0.01 * self.base_speed) * 1.05 + spd_bonus + guts_bonus
 
-            if r.hp <= 0:
-                r.is_exhausted = True; r.is_spurting = False
+            if r.hp <= 0: r.is_exhausted = True; r.is_spurting = False
             else:
                 r.is_exhausted = False 
                 if r.phase == 2 and not r.is_spurting:
@@ -400,15 +594,15 @@ class RaceSimulator:
                     if r.hp >= req_hp: r.is_spurting = True
 
             target_speed = base_target_speed * r.pace_mode_mod
-            
             if r.is_blocked and closest_blocker: target_speed = min(target_speed, closest_blocker.speed + 0.1)
             if r.is_overtaking: target_speed *= 1.05
             if r.is_evading: target_speed *= 1.04
+            
             target_speed += stam_speed_mod
+            target_speed += r.skill_mod_target_speed 
             
             if r.is_exhausted: target_speed = (0.85 * self.base_speed) * (math.sqrt(200 * max(r.guts, 1)) * 0.001)
             elif r.is_spurting: target_speed = spurt_target
-
             r.target_speed = target_speed
 
             accel = math.sqrt(500 * r.pow) * 0.002 * STYLE_MODS[r.style]["acc"][r.phase]
@@ -416,6 +610,8 @@ class RaceSimulator:
             if r.is_start_dash:
                 if r.speed < self.base_speed * 0.85: accel += 24.0
                 else: r.is_start_dash = False
+                
+            accel += r.skill_mod_accel 
 
             if r.is_exhausted: decel = 1.2
             elif r.pace_mode == "PaceDown": decel = 0.5
@@ -435,22 +631,21 @@ class RaceSimulator:
 
             r.dist += r.speed * DT
             
-            # 💡 [파워 기반 몸싸움 연산(Bumping Engine) 포함 레인 이동]
+            if r.bump_cd > 0: r.bump_cd -= DT
+            active_contesters = [o for o in contesting_runners if o.bump_cd <= 0]
             dist_to_target_lane = abs(r.lane - r.target_lane)
             is_lane_path_blocked = False
-            if r.target_lane > r.lane and any(o.lane > r.lane for o in contesting_runners): is_lane_path_blocked = True
-            if r.target_lane < r.lane and any(o.lane < r.lane for o in contesting_runners): is_lane_path_blocked = True
+            
+            if r.target_lane > r.lane and any(o.lane > r.lane for o in active_contesters): is_lane_path_blocked = True
+            if r.target_lane < r.lane and any(o.lane < r.lane for o in active_contesters): is_lane_path_blocked = True
 
-            if dist_to_target_lane <= 0.04 or is_lane_path_blocked:
+            if r.bump_cd <= 0 and (dist_to_target_lane <= 0.04 or is_lane_path_blocked):
                 if r.is_overtaking and r.overtake_target:
                     if r.overtake_target_lane is None:
                         min_l, max_l = self.get_cluster_bounds(r.overtake_target)
-                        c1 = max(0.0, min_l - 0.08)
-                        c2 = min(1.5, max_l + 0.08)
-                        
-                        left_blocked = any(o.lane < r.lane for o in contesting_runners)
-                        right_blocked = any(o.lane > r.lane for o in contesting_runners)
-                        
+                        c1 = max(0.0, min_l - 0.08); c2 = min(1.5, max_l + 0.08)
+                        left_blocked = any(o.lane < r.lane for o in active_contesters)
+                        right_blocked = any(o.lane > r.lane for o in active_contesters)
                         if abs(r.lane - c1) < abs(r.lane - c2): r.overtake_target_lane = c2 if left_blocked and not right_blocked else c1
                         else: r.overtake_target_lane = c1 if right_blocked and not left_blocked else c2
                     r.target_lane = r.overtake_target_lane
@@ -462,7 +657,7 @@ class RaceSimulator:
                         outer_lane_target = min(1.0, r.lane / 0.1) * 0.5 + random.uniform(0, 0.1)
                         r.target_lane = min(r.lane + 0.08, outer_lane_target)
                     else:
-                        inside_blockers = [o for o in self.runners if o.id != r.id and o.dist > r.dist and abs(o.lane - r.lane) <= (1.75 * 0.08) and o.lane <= r.lane]
+                        inside_blockers = [o for o in self.runners if o.id != r.id and o.bump_cd <= 0 and o.dist > r.dist and abs(o.lane - r.lane) <= (1.75 * 0.08) and o.lane <= r.lane]
                         if r.phase == 1 and inside_blockers:
                             worst_blocker = max(inside_blockers, key=lambda x: x.lane)
                             r.target_lane = min(r.lane + 0.08, worst_blocker.lane + (2 * 0.08))
@@ -472,34 +667,41 @@ class RaceSimulator:
 
             if r.pace_mode != "PaceDown": r.pacedown_target_set = False
             if not r.is_overtaking: r.overtake_target_lane = None
+
             r.target_lane = max(0.0, min(r.target_lane, 1.5))
-            
             time_to_change_lane = 1.0 
             lane_move_speed = max((abs(r.target_lane - r.lane) / time_to_change_lane) * DT, 0.01 * DT * 60)
 
-            actual_move = 0.0
-            bump_target = None
+            actual_move = 0.0; bump_target = None
             if r.lane < r.target_lane:
-                blocking_rights = [o for o in contesting_runners if o.lane > r.lane]
+                blocking_rights = [o for o in active_contesters if o.lane > r.lane]
                 if not blocking_rights: actual_move = min(lane_move_speed, r.target_lane - r.lane)
                 else: bump_target = min(blocking_rights, key=lambda x: x.lane - r.lane)
             elif r.lane > r.target_lane:
-                blocking_lefts = [o for o in contesting_runners if o.lane < r.lane]
+                blocking_lefts = [o for o in active_contesters if o.lane < r.lane]
                 if not blocking_lefts: actual_move = -min(lane_move_speed, r.lane - r.target_lane)
                 else: bump_target = min(blocking_lefts, key=lambda x: r.lane - x.lane)
             
-            # 💡 [파워 차이 몸싸움 로직] 이동하려다 막혔을 때
-            if bump_target:
+            if bump_target and r.bump_cd <= 0:
                 pow_ratio = max(r.pow, 1) / max(bump_target.pow, 1)
-                if pow_ratio > 1.2: # 내 파워가 20% 이상 세면 뚫고 지나가며 상대방 감속
-                    actual_move = (lane_move_speed if r.lane < r.target_lane else -lane_move_speed) * 0.5
-                    bump_target.speed = max(bump_target.speed - 0.2, self.base_speed * 0.8) # 상대방 페널티
-                    bump_target.hp -= 2 # 톡 치는 정도의 체력 피해
-                elif pow_ratio < 0.8: # 내 파워가 20% 이상 약하면 내가 튕겨나가고 감속
-                    actual_move = (-0.05 if r.lane < r.target_lane else 0.05) # 반대로 밀림
-                    r.speed = max(r.speed - 0.2, self.base_speed * 0.8) # 내 속도 페널티
-                    r.hp -= 2
-                # 파워가 비슷하면 그냥 이동을 못하고 멈춤 (actual_move = 0)
+                if pow_ratio >= 1.1: 
+                    actual_move = min(lane_move_speed, r.target_lane - r.lane) if r.lane < r.target_lane else -min(lane_move_speed, r.lane - r.target_lane)
+                    push_dir = 0.08 if r.lane < r.target_lane else -0.08
+                    bump_target.target_lane = max(0.0, min(bump_target.lane + push_dir, 1.5)) 
+                    bump_target.speed = max(bump_target.speed - 0.2, self.base_speed * 0.8) 
+                    bump_target.hp -= 2.0; bump_target.bump_cd = 1.0 
+                elif pow_ratio <= 0.9: 
+                    actual_move = 0.0; bounce_dir = -0.04 if r.lane < r.target_lane else 0.04
+                    r.target_lane = max(0.0, min(r.lane + bounce_dir, 1.5)) 
+                    r.speed = max(r.speed - 0.2, self.base_speed * 0.8) 
+                    r.hp -= 2.0; r.bump_cd = 1.0 
+                else:
+                    actual_move = 0.0
+                    r.target_lane = max(0.0, min(r.lane - 0.04 if r.lane <= bump_target.lane else r.lane + 0.04, 1.5))
+                    bump_target.target_lane = max(0.0, min(bump_target.lane + 0.04 if bump_target.lane >= r.lane else bump_target.lane - 0.04, 1.5))
+                    r.speed = max(r.speed - 0.05, self.base_speed * 0.8); r.hp -= 0.5
+                    bump_target.speed = max(bump_target.speed - 0.05, self.base_speed * 0.8); bump_target.hp -= 0.5
+                    r.bump_cd = 1.5; bump_target.bump_cd = 1.5
 
             r.lane = max(0.0, min(r.lane + actual_move, 1.5))
 
@@ -514,13 +716,10 @@ class RaceSimulator:
             current_frame["r"].append([r.id, round(r.dist, 2), round(r.lane, 2), round(r.speed, 2), int(r.hp), r.active_states])
         if current_frame["r"]: self.frames.append(current_frame)
 
-
 @app.route('/api/create_room_final', methods=['POST'])
 def create_room_final():
     cleanup_old_rooms(); data = request.json
-    if not data.get('url') or not data.get('participants') or not data.get('scheduled_time'):
-        return jsonify({"success": False, "message": "데이터 누락"}), 400
-        
+    if not data.get('url') or not data.get('participants') or not data.get('scheduled_time'): return jsonify({"success": False, "message": "데이터 누락"}), 400
     room_id = generate_room_id(); track_len = 2000; runners = []
     
     STAT_WEIGHTS = {
@@ -539,20 +738,14 @@ def create_room_final():
             excess = 0
             for k in raw_stats:
                 if raw_stats[k] > 1200:
-                    excess += raw_stats[k] - 1200
-                    raw_stats[k] = 1200
+                    excess += raw_stats[k] - 1200; raw_stats[k] = 1200
             while excess > 0:
                 available_keys = [k for k in raw_stats if raw_stats[k] < 1200]
                 if not available_keys: break 
-                target = random.choice(available_keys)
-                raw_stats[target] += 1
-                excess -= 1
+                target = random.choice(available_keys); raw_stats[target] += 1; excess -= 1
         
-        row = idx // 18
-        col = idx % 18
-        start_lane = col * 0.08 
-        start_dist = -row * 2.5 
-        
+        row = idx // 18; col = idx % 18
+        start_lane = col * 0.08; start_dist = -row * 2.5 
         runner = Uma(idx, p_name, style, raw_stats, random.choice([1.05, 1.02, 1.00, 0.98, 0.95]), track_len, start_lane, start_dist)
         runners.append(runner)
         
