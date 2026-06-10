@@ -192,6 +192,7 @@ class Uma:
         self.active_skills = []  
         self.skill_mod_target_speed = 0.0
         self.skill_mod_accel = 0.0
+        self.pending_ult = None
 
 class RaceSimulator:
     def __init__(self, runners, track_len):
@@ -374,6 +375,23 @@ class RaceSimulator:
         pacemaker = None
         if self.time >= 2.0 or any(r.dist >= self.section_len for r in self.runners): self.start_phase_cleared = True
         if self.start_phase_cleared: pacemaker = self.get_pacemaker()
+        
+        if pacemaker and pacemaker.section >= 21 and not getattr(self, 'ult_triggered', False):
+            self.ult_triggered = True
+            # 체력이 남아있는 달리는 주자 중 1명을 랜덤으로 추첨
+            alive_runners = [r for r in self.runners if not r.is_exhausted]
+            ult_user = random.choice(alive_runners) if alive_runners else random.choice(self.runners)
+            ult_user.active_skills.append({"type": "목표 속도 증가", "val": 0.5, "dur": 6.0})
+            ult_user.pending_ult = "ULT|테스트 필살기|ult_test.mp3"
+
+        for r in self.runners:
+            if r.dist >= self.track_len: continue
+            r.active_states = []
+            
+            # 💡 이번 프레임에 필살기가 예약되어 있다면 상태값(State)으로 전송
+            if r.pending_ult:
+                r.active_states.append(r.pending_ult)
+                r.pending_ult = None
 
         for r in self.runners:
             if r.dist >= self.track_len: continue
