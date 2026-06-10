@@ -4,6 +4,7 @@ import string
 import random
 import time
 import math
+from collections import deque  # 💡 [피드백 반영] BFS 효율을 위한 deque 도입
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
@@ -11,6 +12,7 @@ from bs4 import BeautifulSoup
 import urllib.parse
 
 app = Flask(__name__)
+# 💡 [피드백 반영] 프로덕션용이라면 origins를 제한하는 것이 좋지만 일단 모든 도메인 허용
 CORS(app)
 
 ROOMS_DB = {}
@@ -91,21 +93,14 @@ def extract_only():
     if error: return jsonify({"success": False, "message": error}), 400
     return jsonify({"success": True, "participants": participants})
 
-# ==========================================
-# 📊 [스킬 데이터 파싱 엔진]
-# ==========================================
 SKILL_DB = {}
 try:
     with open('skills.csv', 'r', encoding='utf-8-sig') as f:
         reader = csv.reader(f)
-        next(reader) # 헤더 건너뛰기
+        next(reader)
         for row in reader:
             if not row or not row[0].strip(): continue
-            
-            # 💡 [핵심 버그 픽스] 엑셀 CSV 특성 상 빈 셀은 잘려서 배열 길이가 짧아지는 현상 완벽 방어
-            if len(row) < 16:
-                row.extend([''] * (16 - len(row)))
-                
+            if len(row) < 16: row.extend([''] * (16 - len(row)))
             s_id = row[0].strip()
             SKILL_DB[s_id] = {
                 "id": s_id, "name": row[1].strip(), "icon": row[2].strip(),
@@ -131,13 +126,9 @@ try:
 except Exception as e:
     print("skills.csv 파일 로드 실패 (파일 경로 또는 형식을 확인하세요):", e)
 
-# ==========================================
-# 🐎 [백엔드 코어] 물리 엔진 및 AI 로직
-# ==========================================
 FPS = 15
 DT = 1.0 / FPS
 
-# 💡 스킬 판정에 필수적인 트랙 세그먼트 전역 변수! (이게 빠지면 NameError로 500 에러 발생)
 TRACK_SEGMENTS = [
     (0, 200, "straight"), (200, 400, "corner"), (400, 950, "straight"),
     (950, 1225, "corner"), (1225, 1475, "corner"), (1475, 2000, "straight")
@@ -192,6 +183,7 @@ class Uma:
         self.active_skills = []  
         self.skill_mod_target_speed = 0.0
         self.skill_mod_accel = 0.0
+        
         self.pending_ult = None
 
 class RaceSimulator:
@@ -201,6 +193,7 @@ class RaceSimulator:
         self.base_speed = max(16.0, 20.0 - ((track_len - 2000) / 1000.0))
         self.time = 0.0; self.frames = []; self.race_mod = 0.0008 * (track_len - 1000) + 1.0
         self.start_phase_cleared = False
+        self.ult_triggered = False # 💡 필살기 발동 여부 기록
         
         UNIQUE_SKILLS = [s for s in SKILL_DB.values() if s['icon'] == '고유.png']
         COMMON_SKILLS = [s for s in SKILL_DB.values() if s['icon'] != '고유.png']
@@ -247,7 +240,6 @@ class RaceSimulator:
                             e_scaled = e * (self.track_len / 2000.0)
                             if is_corner and t != "corner": continue
                             if is_straight and t != "straight": continue
-                            
                             ns = max(s_scaled, min_dist)
                             ne = min(e_scaled, max_dist)
                             if ns < ne: valid_ranges.append((ns, ne))
@@ -267,16 +259,26 @@ class RaceSimulator:
 
     def run(self):
         safety = 0
-        while any(r.dist < self.track_len for r in self.runners) and safety < 30000:
-            self.tick(); self.time += DT; safety += 1
+        first_finish_time = None
+        while safety < 30000:
+            self.tick()
+            self.time += DT
+            safety += 1
+            leader_dist = max(r.dist for r in self.runners)
+            if leader_dist >= self.track_len and first_finish_time is None:
+                first_finish_time = self.time
+            if first_finish_time is not None and self.time >= first_finish_time + 3.0:
+                break
+            if all(r.is_exhausted and r.speed < 1.0 for r in self.runners) and safety > 1000:
+                break
         return self.frames
 
     def get_cluster_bounds(self, center_runner):
         visited = set([center_runner.id])
-        queue = [center_runner]
+        queue = deque([center_runner]) # 💡 [피드백 반영] popleft를 위한 deque 적용
         min_lane = center_runner.lane; max_lane = center_runner.lane
         while queue:
-            curr = queue.pop(0)
+            curr = queue.popleft()
             for o in self.runners:
                 if o.id in visited or o.bump_cd > 0: continue 
                 if abs(o.dist - curr.dist) <= 3.0 and abs(o.lane - curr.lane) <= (2 * 0.08):
@@ -293,14 +295,12 @@ class RaceSimulator:
 
     def check_skill_conditions(self, r, skill):
         if skill["target_dist"] >= 0 and r.dist < skill["target_dist"]: return False
-        
         data = skill["data"]
         for c in data["conditions"]:
             if "초반" in c and r.phase != 0: return False
             if "중반 이후" in c and r.phase < 1: return False
             elif "중반" in c and r.phase != 1: return False
             if "종반" in c and r.phase != 2: return False
-            
             match = re.search(r'(\d+)구간 이후', c)
             if match and r.section < int(match.group(1)): return False
             match = re.search(r'(\d+)구간 이전', c)
@@ -318,7 +318,6 @@ class RaceSimulator:
             if "최종 코너 진입" in c and not (is_final_corner and r.dist - r.speed * DT * 15 < 1225 * scale): return False
             if "최종 직선 진입" in c and not (is_final_straight and r.dist - r.speed * DT * 15 < 1475 * scale): return False
             if "직선 진입" in c and not (is_straight and r.dist - r.speed * DT * 15 < 400 * scale): return False
-            
             if "무작위 코너" in c and not is_corner: return False
             if "무작위 직선" in c and not is_straight: return False
             if "최종 코너" in c and "진입" not in c and not is_final_corner: return False
@@ -329,26 +328,21 @@ class RaceSimulator:
                     nearby_count = sum(1 for o in self.runners if o.id != r.id and abs(o.dist - r.dist) <= 3.0 and abs(o.lane - r.lane) <= (3.0 * 0.08))
                     if nearby_count < 2: return False
                 elif not r.is_nearby: return False
-            
             if "앞이 가로막힘" in c:
                 if "2초" in c and r.time_blocked < 2.0: return False
                 elif r.time_blocked < 0.1: return False
-            
             if "옆이 가로막힘" in c:
                 if "5초" in c and r.time_contested < 5.0: return False
                 elif "2초" in c and r.time_contested < 2.0: return False
                 elif r.time_contested < 0.1: return False
-                
             if "바로 뒤에 주자" in c and "2초" in c:
                 if r.time_followed < 2.0: return False
-                
             if "둘러싸임" in c:
                 if not (r.is_blocked and r.is_contested and r.is_followed): return False
             if "앞이 가로막히지 않음" in c and r.is_blocked: return False
             if "최종 직선 진입 후 5초 이상" in c and r.time_in_final_straight < 5.0: return False
             if "레인 0.4 이내" in c and r.lane > 0.4: return False
             if "추월모드" in c and not r.is_overtaking: return False
-            
             if "순위" in c:
                 rank_pct = r.rank / max(len(self.runners), 1)
                 match = re.search(r'(\d+)%', c)
@@ -375,27 +369,25 @@ class RaceSimulator:
         pacemaker = None
         if self.time >= 2.0 or any(r.dist >= self.section_len for r in self.runners): self.start_phase_cleared = True
         if self.start_phase_cleared: pacemaker = self.get_pacemaker()
-        
-        if pacemaker and pacemaker.section >= 21 and not getattr(self, 'ult_triggered', False):
+
+        # 💡 [필살기 발동 엔진 완벽 픽스] 21구간 진입 시 1회 무조건 발동
+        if pacemaker and pacemaker.section >= 21 and not self.ult_triggered:
             self.ult_triggered = True
-            # 체력이 남아있는 달리는 주자 중 1명을 랜덤으로 추첨
             alive_runners = [r for r in self.runners if not r.is_exhausted]
-            ult_user = random.choice(alive_runners) if alive_runners else random.choice(self.runners)
-            ult_user.active_skills.append({"type": "목표 속도 증가", "val": 0.5, "dur": 6.0})
-            ult_user.pending_ult = "ULT|테스트 필살기|ult_test.mp3"
+            if alive_runners:
+                ult_user = random.choice(alive_runners)
+                ult_user.active_skills.append({"type": "목표 속도 증가", "val": 0.5, "dur": 6.0})
+                ult_user.pending_ult = "ULT|테스트 필살기|ult_test.mp3"
 
         for r in self.runners:
-            if r.dist >= self.track_len: continue
             r.active_states = []
             
-            # 💡 이번 프레임에 필살기가 예약되어 있다면 상태값(State)으로 전송
-            if r.pending_ult:
+            # 💡 이번 틱에 필살기가 발동되었다면 배열에 담아서 프론트로 전송
+            if getattr(r, 'pending_ult', None):
                 r.active_states.append(r.pending_ult)
                 r.pending_ult = None
-
-        for r in self.runners:
+                
             if r.dist >= self.track_len: continue
-            r.active_states = []
             
             if self.time < r.start_delay:
                 current_frame["r"].append([r.id, round(r.dist, 2), round(r.lane, 2), 0.0, int(r.hp), ["LateStart"]])
@@ -413,7 +405,6 @@ class RaceSimulator:
             for o in self.runners:
                 if o.id == r.id: continue
                 dist_diff = o.dist - r.dist; lane_diff = abs(o.lane - r.lane)
-
                 if 0 < dist_diff <= 2.0 and lane_diff <= (0.5 * 0.08):
                     r.is_blocked = True
                     if dist_diff < min_block_dist: min_block_dist = dist_diff; closest_blocker = o
@@ -437,7 +428,6 @@ class RaceSimulator:
                     if self.check_skill_conditions(r, skill):
                         skill["triggered"] = True
                         r.active_states.append(f"SKILL|{skill['data']['name']}|{skill['data']['icon']}")
-                        
                         for eff in skill["data"]["effects"]:
                             targets = []
                             if eff["target"] == "self": targets = [r]
@@ -633,6 +623,13 @@ class RaceSimulator:
             
             if r.is_exhausted: target_speed = (0.85 * self.base_speed) * (math.sqrt(200 * max(r.guts, 1)) * 0.001)
             elif r.is_spurting: target_speed = spurt_target
+            
+            if r.dist >= self.track_len:
+                target_speed = self.base_speed * 0.4
+                r.is_spurting = False
+                r.pace_mode = "Normal"
+                r.is_overtaking = False
+                
             r.target_speed = target_speed
 
             accel = math.sqrt(500 * r.pow) * 0.002 * STYLE_MODS[r.style]["acc"][r.phase]
@@ -671,13 +668,25 @@ class RaceSimulator:
 
             if r.bump_cd <= 0 and (dist_to_target_lane <= 0.04 or is_lane_path_blocked):
                 if r.is_overtaking and r.overtake_target:
-                    if r.overtake_target_lane is None:
-                        min_l, max_l = self.get_cluster_bounds(r.overtake_target)
-                        c1 = max(0.0, min_l - 0.08); c2 = min(1.5, max_l + 0.08)
-                        left_blocked = any(o.lane < r.lane for o in active_contesters)
-                        right_blocked = any(o.lane > r.lane for o in active_contesters)
-                        if abs(r.lane - c1) < abs(r.lane - c2): r.overtake_target_lane = c2 if left_blocked and not right_blocked else c1
-                        else: r.overtake_target_lane = c1 if right_blocked and not left_blocked else c2
+                    # 💡 [마군 방지 AI 픽스] 막히면 언제든 재탐색 허용
+                    min_l, max_l = self.get_cluster_bounds(r.overtake_target)
+                    c1 = min(1.5, max_l + 0.08) 
+                    c2 = max(0.0, min_l - 0.08) 
+                    
+                    left_blocked = any(o.lane < r.lane for o in active_contesters)
+                    right_blocked = any(o.lane > r.lane for o in active_contesters)
+                    
+                    dist_c1 = abs(r.lane - c1)
+                    dist_c2 = abs(r.lane - c2)
+                    weight_c1 = 1.0
+                    weight_c2 = 0.85 if r.phase == 2 else 1.0
+                    
+                    if left_blocked and not right_blocked: r.overtake_target_lane = c1
+                    elif right_blocked and not left_blocked: r.overtake_target_lane = c2
+                    else:
+                        if (dist_c2 * weight_c2) <= (dist_c1 * weight_c1): r.overtake_target_lane = c2
+                        else: r.overtake_target_lane = c1
+                            
                     r.target_lane = r.overtake_target_lane
                 else:
                     if r.is_exhausted: r.target_lane = r.lane 
@@ -719,19 +728,19 @@ class RaceSimulator:
                     push_dir = 0.08 if r.lane < r.target_lane else -0.08
                     bump_target.target_lane = max(0.0, min(bump_target.lane + push_dir, 1.5)) 
                     bump_target.speed = max(bump_target.speed - 0.2, self.base_speed * 0.8) 
-                    bump_target.hp -= 2.0; bump_target.bump_cd = 1.0 
+                    bump_target.hp -= 2.0; bump_target.bump_cd = 0.8 
                 elif pow_ratio <= 0.9: 
                     actual_move = 0.0; bounce_dir = -0.04 if r.lane < r.target_lane else 0.04
                     r.target_lane = max(0.0, min(r.lane + bounce_dir, 1.5)) 
                     r.speed = max(r.speed - 0.2, self.base_speed * 0.8) 
-                    r.hp -= 2.0; r.bump_cd = 1.0 
+                    r.hp -= 2.0; r.bump_cd = 0.8 
                 else:
                     actual_move = 0.0
                     r.target_lane = max(0.0, min(r.lane - 0.04 if r.lane <= bump_target.lane else r.lane + 0.04, 1.5))
                     bump_target.target_lane = max(0.0, min(bump_target.lane + 0.04 if bump_target.lane >= r.lane else bump_target.lane - 0.04, 1.5))
                     r.speed = max(r.speed - 0.05, self.base_speed * 0.8); r.hp -= 0.5
                     bump_target.speed = max(bump_target.speed - 0.05, self.base_speed * 0.8); bump_target.hp -= 0.5
-                    r.bump_cd = 1.5; bump_target.bump_cd = 1.5
+                    r.bump_cd = 0.5; bump_target.bump_cd = 0.5
 
             r.lane = max(0.0, min(r.lane + actual_move, 1.5))
 
@@ -764,15 +773,19 @@ def create_room_final():
         total_points = random.randint(4000, 4500) 
         raw_stats = {k: int(total_points * w) for k, w in STAT_WEIGHTS[style].items()}
         
-        while any(v > 1200 for v in raw_stats.values()):
+        # 💡 [피드백 반영] 극단적인 무한루프 회피를 위한 안전장치 추가
+        safety_break = 0
+        while any(v > 1200 for v in raw_stats.values()) and safety_break < 100:
             excess = 0
             for k in raw_stats:
                 if raw_stats[k] > 1200:
                     excess += raw_stats[k] - 1200; raw_stats[k] = 1200
             while excess > 0:
                 available_keys = [k for k in raw_stats if raw_stats[k] < 1200]
-                if not available_keys: break 
+                if not available_keys: 
+                    excess = 0; break 
                 target = random.choice(available_keys); raw_stats[target] += 1; excess -= 1
+            safety_break += 1
         
         row = idx // 18; col = idx % 18
         start_lane = col * 0.08; start_dist = -row * 2.5 
@@ -789,6 +802,9 @@ def create_room_final():
 @app.route('/api/room/<room_id>', methods=['GET'])
 def get_room(room_id):
     cleanup_old_rooms()
-    return jsonify({"success": True, "data": ROOMS_DB[room_id.upper()]}) if room_id.upper() in ROOMS_DB else jsonify({"success": False, "message": "방 없음"}), 404
+    # 💡 [피드백 반영] 404 에러 시 튜플 문법 교정
+    if room_id.upper() in ROOMS_DB:
+        return jsonify({"success": True, "data": ROOMS_DB[room_id.upper()]})
+    return jsonify({"success": False, "message": "방 없음"}), 404
 
 if __name__ == '__main__': app.run(host='0.0.0.0', port=5000, debug=True)
