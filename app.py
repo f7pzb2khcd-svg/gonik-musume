@@ -4,7 +4,7 @@ import string
 import random
 import time
 import math
-from collections import deque  # 💡 [피드백 반영] BFS 효율을 위한 deque 도입
+from collections import deque
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
@@ -12,7 +12,6 @@ from bs4 import BeautifulSoup
 import urllib.parse
 
 app = Flask(__name__)
-# 💡 [피드백 반영] 프로덕션용이라면 origins를 제한하는 것이 좋지만 일단 모든 도메인 허용
 CORS(app)
 
 ROOMS_DB = {}
@@ -124,7 +123,41 @@ try:
                     dur = float(row[i+2]) if row[i+2].strip() else 0.0
                     SKILL_DB[s_id]["effects"].append({"target": target, "type": eff_type, "val": val, "dur": dur})
 except Exception as e:
-    print("skills.csv 파일 로드 실패 (파일 경로 또는 형식을 확인하세요):", e)
+    print("skills.csv 파일 로드 실패:", e)
+
+# 💡 [필살기 CSV 로드] 파일명이 ultimates.csv 인지 꼭 확인해주세요!
+ULT_DB = {}
+try:
+    with open('ultimates.csv', 'r', encoding='utf-8-sig') as f:
+        reader = csv.reader(f)
+        next(reader)
+        for row in reader:
+            if not row or not row[0].strip(): continue
+            if len(row) < 15: row.extend([''] * (15 - len(row)))
+            u_id = row[0].strip()
+            ULT_DB[u_id] = {
+                "id": u_id, "name": row[1].strip(), "sound": row[2].strip(),
+                "conditions": [c.strip() for c in row[3:6] if c.strip()],
+                "effects": []
+            }
+            for i in range(6, 15, 3):
+                if row[i].strip():
+                    eff_type = row[i].strip()
+                    target = "self"
+                    if "근처에 있는 주자" in eff_type: target = "nearby"; eff_type = eff_type.replace("근처에 있는 주자 ", "")
+                    elif "앞에 있는 주자" in eff_type: target = "front"; eff_type = eff_type.replace("앞에 있는 주자 ", "")
+                    elif "뒤에 있는 주자" in eff_type: target = "behind"; eff_type = eff_type.replace("뒤에 있는 주자 ", "")
+                    elif "옆에 있는 주자" in eff_type: target = "side"; eff_type = eff_type.replace("옆에 있는 주자 ", "")
+                    elif "나를 제외한 주자" in eff_type: target = "all_enemies"; eff_type = eff_type.replace("나를 제외한 주자 ", "")
+                    
+                    if eff_type == "속도 증가": eff_type = "목표 속도 증가"
+                    if eff_type == "속도 감소": eff_type = "목표 속도 감소"
+
+                    val = float(row[i+1]) if row[i+1].strip() else 0.0
+                    dur = float(row[i+2]) if row[i+2].strip() else 0.0
+                    ULT_DB[u_id]["effects"].append({"target": target, "type": eff_type, "val": val, "dur": dur})
+except Exception as e:
+    print("ultimates.csv 파일 로드 실패:", e)
 
 FPS = 15
 DT = 1.0 / FPS
@@ -193,7 +226,7 @@ class RaceSimulator:
         self.base_speed = max(16.0, 20.0 - ((track_len - 2000) / 1000.0))
         self.time = 0.0; self.frames = []; self.race_mod = 0.0008 * (track_len - 1000) + 1.0
         self.start_phase_cleared = False
-        self.ult_triggered = False # 💡 필살기 발동 여부 기록
+        self.ult_triggered = False
         
         UNIQUE_SKILLS = [s for s in SKILL_DB.values() if s['icon'] == '고유.png']
         COMMON_SKILLS = [s for s in SKILL_DB.values() if s['icon'] != '고유.png']
@@ -265,10 +298,8 @@ class RaceSimulator:
             self.time += DT
             safety += 1
             leader_dist = max(r.dist for r in self.runners)
-            # 선두가 2000m를 넘으면 타이머 시작
             if leader_dist >= self.track_len and first_finish_time is None:
                 first_finish_time = self.time
-            # 1등 통과 후 3초간 레이스를 더 진행시킴!
             if first_finish_time is not None and self.time >= first_finish_time + 3.0:
                 break
             if all(r.is_exhausted and r.speed < 1.0 for r in self.runners) and safety > 1000:
@@ -277,7 +308,7 @@ class RaceSimulator:
 
     def get_cluster_bounds(self, center_runner):
         visited = set([center_runner.id])
-        queue = deque([center_runner]) # 💡 [피드백 반영] popleft를 위한 deque 적용
+        queue = deque([center_runner])
         min_lane = center_runner.lane; max_lane = center_runner.lane
         while queue:
             curr = queue.popleft()
@@ -333,12 +364,15 @@ class RaceSimulator:
             if "앞이 가로막힘" in c:
                 if "2초" in c and r.time_blocked < 2.0: return False
                 elif r.time_blocked < 0.1: return False
+            if "양 옆이 가로막힘" in c:
+                if r.time_contested < 0.1: return False
             if "옆이 가로막힘" in c:
                 if "5초" in c and r.time_contested < 5.0: return False
                 elif "2초" in c and r.time_contested < 2.0: return False
                 elif r.time_contested < 0.1: return False
-            if "바로 뒤에 주자" in c and "2초" in c:
-                if r.time_followed < 2.0: return False
+            if "바로 뒤에 주자" in c:
+                if "2초" in c and r.time_followed < 2.0: return False
+                elif r.time_followed < 0.1: return False
             if "둘러싸임" in c:
                 if not (r.is_blocked and r.is_contested and r.is_followed): return False
             if "앞이 가로막히지 않음" in c and r.is_blocked: return False
@@ -372,270 +406,298 @@ class RaceSimulator:
         if self.time >= 2.0 or any(r.dist >= self.section_len for r in self.runners): self.start_phase_cleared = True
         if self.start_phase_cleared: pacemaker = self.get_pacemaker()
 
-        # 💡 [필살기 발동 엔진 완벽 픽스] 21구간 진입 시 1회 무조건 발동
+        # 💡 [CSV 필살기 발동 로직] 21구간 진입 시 랜덤 1명 추첨하여 조건 맞는 필살기 발동!
         if pacemaker and pacemaker.section >= 21 and not self.ult_triggered:
             self.ult_triggered = True
             alive_runners = [r for r in self.runners if not r.is_exhausted]
             if alive_runners:
-                ult_user = random.choice(alive_runners)
-                ult_user.active_skills.append({"type": "목표 속도 증가", "val": 0.5, "dur": 6.0})
-                ult_user.pending_ult = "ULT|테스트 필살기|ult_test.mp3"
+                random.shuffle(alive_runners)
+                ult_user = None
+                chosen_ult = None
+                
+                # 살아있는 주자들 중 조건에 맞는 필살기를 가진 주자 탐색
+                for r in alive_runners:
+                    valid_ults = []
+                    for u in ULT_DB.values():
+                        mock_skill = {"target_dist": -1, "data": {"conditions": u["conditions"]}}
+                        if self.check_skill_conditions(r, mock_skill):
+                            valid_ults.append(u)
+                    if valid_ults:
+                        ult_user = r
+                        chosen_ult = random.choice(valid_ults)
+                        break
+                
+                # 만약 아무도 조건이 맞지 않으면 무조건 발동하는 필살기나 기본 필살기로 폴백
+                if not ult_user:
+                    ult_user = random.choice(alive_runners)
+                    chosen_ult = random.choice(list(ULT_DB.values())) if ULT_DB else {"name": "테스트 필살기", "sound": "ult_test.mp3", "effects": [{"target": "self", "type": "목표 속도 증가", "val": 0.5, "dur": 6.0}]}
+
+                if chosen_ult:
+                    for eff in chosen_ult["effects"]:
+                        targets = []
+                        if eff["target"] == "self": targets = [ult_user]
+                        elif eff["target"] == "nearby": targets = [o for o in self.runners if o.id != ult_user.id and abs(o.dist - ult_user.dist) <= 3.0 and abs(o.lane - ult_user.lane) <= (3.0 * 0.08)]
+                        elif eff["target"] == "front": targets = [o for o in self.runners if o.id != ult_user.id and 0 < o.dist - ult_user.dist <= 3.0]
+                        elif eff["target"] == "behind": targets = [o for o in self.runners if o.id != ult_user.id and 0 < ult_user.dist - o.dist <= 3.0]
+                        elif eff["target"] == "side": targets = [o for o in self.runners if o.id != ult_user.id and abs(o.dist - ult_user.dist) <= 1.0 and abs(o.lane - ult_user.lane) <= (2.0 * 0.08)]
+                        elif eff["target"] == "all_enemies": targets = [o for o in self.runners if o.id != ult_user.id]
+
+                        for t in targets:
+                            if eff["type"] == "지구력 회복": t.hp = min(t.hp + t.max_hp * (eff["val"]/100.0), t.max_hp)
+                            elif eff["type"] == "지구력 감소": t.hp = max(0, t.hp + t.max_hp * (eff["val"]/100.0))
+                            elif eff["type"] == "현재 속도 증가": t.speed += eff["val"]
+                            elif eff["type"] == "목표 속도 증가" or eff["type"] == "목표 속도 감소" or eff["type"] == "가속도 증가" or eff["type"] == "가속도 감소" or eff["type"] == "파워 증가" or eff["type"] == "파워 감소" or eff["type"] == "근성 증가" or eff["type"] == "근성 감소":
+                                t.active_skills.append({"type": eff["type"], "val": eff["val"], "dur": eff["dur"]})
+                    
+                    ult_user.pending_ult = f"ULT|{chosen_ult['name']}|{chosen_ult['sound']}"
 
         for r in self.runners:
             r.active_states = []
             
-            # 💡 이번 틱에 필살기가 발동되었다면 배열에 담아서 프론트로 전송
             if getattr(r, 'pending_ult', None):
                 r.active_states.append(r.pending_ult)
                 r.pending_ult = None
                 
             if r.dist >= self.track_len:
-                # 결승선 통과 후 겹치지 않게 조깅 감속
+                # 결승선 통과 후 겹치지 않게 조깅
                 target_speed = self.base_speed * (0.4 + (r.id % 5) * 0.02)
                 r.is_spurting = False
                 r.pace_mode = "Normal"
                 r.is_overtaking = False
-            
-            if self.time < r.start_delay:
-                current_frame["r"].append([r.id, round(r.dist, 2), round(r.lane, 2), 0.0, int(r.hp), ["LateStart"]])
-                continue
-
-            r.section = max(1, math.floor(r.dist / self.section_len) + 1)
-            if r.section <= 4: r.phase = 0
-            elif r.section <= 16: r.phase = 1
-            else: r.phase = 2
-
-            r.is_blocked = False; r.is_contested = False; r.is_followed = False; r.is_nearby = False
-            closest_blocker = None; min_block_dist = 999.0
-            contesting_runners = []
-
-            for o in self.runners:
-                if o.id == r.id: continue
-                dist_diff = o.dist - r.dist; lane_diff = abs(o.lane - r.lane)
-                if 0 < dist_diff <= 2.0 and lane_diff <= (0.5 * 0.08):
-                    r.is_blocked = True
-                    if dist_diff < min_block_dist: min_block_dist = dist_diff; closest_blocker = o
-                if abs(dist_diff) <= 1.0 and lane_diff <= (2.0 * 0.08): r.is_contested = True; contesting_runners.append(o)
-                if 0 < -dist_diff <= 2.5 and lane_diff <= (1.0 * 0.08): r.is_followed = True
-                if abs(dist_diff) <= 3.0 and lane_diff <= (3.0 * 0.08): r.is_nearby = True
-
-            if r.is_blocked: r.time_blocked += DT
-            else: r.time_blocked = 0
-            if r.is_contested: r.time_contested += DT
-            else: r.time_contested = 0
-            if r.is_followed: r.time_followed += DT
-            else: r.time_followed = 0
-            if r.dist > 1475: r.time_in_final_straight += DT
-
-            r.pow = r.base_pow; r.guts = r.base_guts
-            r.skill_mod_target_speed = 0.0; r.skill_mod_accel = 0.0
-            
-            for skill in r.owned_skills:
-                if not skill["triggered"]:
-                    if self.check_skill_conditions(r, skill):
-                        skill["triggered"] = True
-                        r.active_states.append(f"SKILL|{skill['data']['name']}|{skill['data']['icon']}")
-                        for eff in skill["data"]["effects"]:
-                            targets = []
-                            if eff["target"] == "self": targets = [r]
-                            elif eff["target"] == "nearby": targets = [o for o in self.runners if o.id != r.id and abs(o.dist - r.dist) <= 3.0 and abs(o.lane - r.lane) <= (3.0 * 0.08)]
-                            elif eff["target"] == "front": targets = [o for o in self.runners if o.id != r.id and 0 < o.dist - r.dist <= 3.0]
-                            elif eff["target"] == "behind": targets = [o for o in self.runners if o.id != r.id and 0 < r.dist - o.dist <= 3.0]
-                            elif eff["target"] == "side": targets = [o for o in self.runners if o.id != r.id and abs(o.dist - r.dist) <= 1.0 and abs(o.lane - r.lane) <= (2.0 * 0.08)]
-                            elif eff["target"] == "all_enemies": targets = [o for o in self.runners if o.id != r.id]
-
-                            for t in targets:
-                                if eff["type"] == "지구력 회복": t.hp = min(t.hp + t.max_hp * (eff["val"]/100.0), t.max_hp)
-                                elif eff["type"] == "지구력 감소": t.hp = max(0, t.hp + t.max_hp * (eff["val"]/100.0))
-                                elif eff["type"] == "현재 속도 증가": t.speed += eff["val"]
-                                else: t.active_skills.append({"type": eff["type"], "val": eff["val"], "dur": eff["dur"]})
-
-            alive_skills = []
-            for askill in r.active_skills:
-                if askill["type"] == "목표 속도 증가" or askill["type"] == "목표 속도 감소": r.skill_mod_target_speed += askill["val"]
-                elif askill["type"] == "가속도 증가" or askill["type"] == "가속도 감소": r.skill_mod_accel += askill["val"]
-                elif askill["type"] == "파워 증가" or askill["type"] == "파워 감소": r.pow += askill["val"]
-                elif askill["type"] == "근성 증가" or askill["type"] == "근성 감소": r.guts += askill["val"]
-                askill["dur"] -= DT
-                if askill["dur"] > 0: alive_skills.append(askill)
-            r.active_skills = alive_skills
-
-
-            if r.section == r.kakari_target_section and not r.has_kakari_history:
-                r.is_kakari = True; r.has_kakari_history = True; r.kakari_timer = 12.0
-            if r.is_kakari:
-                r.kakari_timer -= DT
-                if r.kakari_timer % 3.0 < DT and random.random() < 0.55: r.kakari_timer = 0
-                if r.kakari_timer <= 0: r.is_kakari = False; r.style = r.original_style
-
-            if r.pace_eval_cd > 0: r.pace_eval_cd -= DT
-            if r.section > 10 and r.pace_mode != "Normal": r.pace_mode = "Normal"; r.pace_mode_mod = 1.0; r.pace_eval_cd = 0.0
-                
-            if r.pace_mode != "Normal" and pacemaker:
-                terminate = False
-                behind_strats = {"도주": ["선행", "선입", "추입"], "선행": ["선입", "추입"], "선입": ["추입"], "추입": []}
-                has_behind_enemy = any(o.dist > r.dist and o.style in behind_strats.get(r.style, []) for o in self.runners)
-                dist_to_pm = pacemaker.dist - r.dist
-                
-                if r.pace_mode == "PaceUpEx":
-                    if not has_behind_enemy or r.section > r.pace_activation_section: terminate = True
-                elif r.pace_mode == "PaceUp":
-                    if r.style == "도주":
-                        dist_to_closest_behind = min([r.dist - o.dist for o in self.runners if o.dist < r.dist] + [999])
-                        if dist_to_closest_behind >= 4.5: terminate = True
-                    else:
-                        if dist_to_pm <= r.pace_target_dist: terminate = True
-                elif r.pace_mode == "Chase":
-                    if (r.dist - pacemaker.dist) >= 10.0 or r.section > r.pace_activation_section: terminate = True
-                elif r.pace_mode == "PaceDown":
-                    if dist_to_pm <= r.pace_target_dist: terminate = True
-
-                if terminate: r.pace_mode = "Normal"; r.pace_mode_mod = 1.0; r.pace_eval_cd = 1.0 
-
-            if pacemaker and r.section <= 10 and r.pace_eval_cd <= 0 and r.pace_mode == "Normal":
-                if r.section not in r.is_pace_eval_passed:
-                    r.is_pace_eval_passed.add(r.section)
-                    is_escape = (r.style == "도주" or (pacemaker.style != "도주" and r.id == pacemaker.id))
-                    activated = False
-                    if is_escape:
-                        behind_strats = {"도주": ["선행", "선입", "추입"], "선행": ["선입", "추입"], "선입": ["추입"], "추입": []}
-                        if any(o.dist > r.dist and o.style in behind_strats[r.style] for o in self.runners):
-                            r.pace_mode = "PaceUpEx"; r.pace_mode_mod = 2.0; activated = True
-                        elif r.id == pacemaker.id:
-                            diff_2nd = pacemaker.dist - max([o.dist for o in self.runners if o.id != pacemaker.id] + [0])
-                            limit = 12.5 if sum(1 for o in self.runners if o.style == "도주") == 1 else 4.5
-                            if diff_2nd <= limit:
-                                if random.random() < (1.0 if r.is_kakari else (20 * math.log10(max(r.intel, 1) * 0.1))/100.0): r.pace_mode = "PaceUp"; r.pace_mode_mod = 1.04; activated = True
-                                else: r.pace_eval_cd = 2.0
-                        elif r.id != pacemaker.id: 
-                            if random.random() < (1.0 if r.is_kakari else (20 * math.log10(max(r.intel, 1) * 0.1))/100.0): r.pace_mode = "Chase"; r.pace_mode_mod = 1.05; activated = True
-                            else: r.pace_eval_cd = 2.0
-                    else:
-                        behind_strats = {"선행": ["선입", "추입"], "선입": ["추입"], "추입": []}
-                        if any(o.dist > r.dist and o.style in behind_strats.get(r.style, []) for o in self.runners):
-                            r.pace_mode = "PaceUpEx"; r.pace_mode_mod = 2.0; activated = True
-                        else:
-                            dist_diff = pacemaker.dist - r.dist
-                            upper = {"선행": 5.0, "선입": 7.0, "추입": 8.0}.get(r.style, 999) * self.race_mod
-                            lower = {"선행": 3.0, "선입": 6.5, "추입": 7.5}.get(r.style, 0) * (self.race_mod if r.style != "선행" else 1.0)
-                            if dist_diff < lower:
-                                r.pace_mode = "PaceDown"; r.pace_mode_mod = 0.915 if r.phase == 0 else 0.945; activated = True
-                                r.pace_target_dist = random.uniform(lower, upper)
-                            elif dist_diff >= upper:
-                                if random.random() < (1.0 if r.is_kakari else (15 * math.log10(max(r.intel, 1) * 0.1))/100.0): r.pace_mode = "PaceUp"; r.pace_mode_mod = 1.04; activated = True; r.pace_target_dist = random.uniform(lower, upper)
-                                else: r.pace_eval_cd = 2.0
-                    if activated: r.pace_activation_section = r.section
-
-            if r.overtake_eval_cd > 0: r.overtake_eval_cd -= DT
-            if r.is_overtaking:
-                r.overtake_timer -= DT
-                if r.overtake_timer <= 0: r.is_overtaking = False; r.overtake_eval_cd = 1.0; r.overtake_target = None; r.overtake_target_lane = None 
-            if r.is_evading:
-                r.evade_timer -= DT
-                if r.evade_timer <= 0: r.is_evading = False
-            
-            if r.section > 10 and r.overtake_eval_cd <= 0 and not r.is_overtaking:
-                if r.is_blocked and closest_blocker:
-                    r.is_overtaking = True; r.overtake_timer = 1.5; r.overtake_eval_cd = 2.5
-                    r.overtake_target = closest_blocker 
-                    target_prob = (20 * math.log10(max(closest_blocker.intel, 1) * 0.1)) / 100.0
-                    if random.random() < target_prob: closest_blocker.is_evading = True; closest_blocker.evade_timer = 1.5
-                else:
-                    for target in self.runners:
-                        if target.id == r.id: continue
-                        dist_diff = target.dist - r.dist
-                        if 0 < dist_diff <= 20.0:
-                            speed_diff = r.speed - target.speed
-                            time_to_catch = dist_diff / speed_diff if speed_diff > 0 else 999
-                            if (time_to_catch < 15.0 and r.target_speed > target.target_speed) or (target.is_blocked and r.target_speed > target.speed):
-                                prob = (20 * math.log10(max(r.intel, 1) * 0.1)) / 100.0
-                                if random.random() < prob:
-                                    r.is_overtaking = True; r.overtake_timer = 1.5; r.overtake_eval_cd = 2.5
-                                    r.overtake_target = target 
-                                    target_prob = (20 * math.log10(max(target.intel, 1) * 0.1)) / 100.0
-                                    if random.random() < target_prob: target.is_evading = True; target.evade_timer = 1.5
-                                else: r.overtake_eval_cd = 2.0
-                                break
-
-            stam_speed_mod = 0.0
-            if r.stam_sys_cd > 0: r.stam_sys_cd -= DT
-            if 11 <= r.section <= 15 and r.stam_sys_cd <= 0 and not r.stam_sys_active:
-                activated_skill = None
-                spd_b = math.sqrt(500 * r.spd) * 0.002; guts_b = math.pow(450 * r.guts, 0.597) * 0.0001
-                s_targ = (self.base_speed * STYLE_MODS[r.style]["spd"][2] + 0.01 * self.base_speed) * 1.05 + spd_b + guts_b
-                g_drain = 1.0 + 200.0 / math.sqrt(600 * max(r.guts, 1))
-                req_hp_spurt = (((self.track_len - r.dist) - 60) / max(s_targ, 1)) * ((20 * math.pow(s_targ - self.base_speed + 12, 2) / 144.0) * g_drain)
-                
-                if r.hp < 1.05 * req_hp_spurt:
-                    if random.random() < (30 * math.pow(max(r.intel, 1) / 1000.0, 0.03)) / 100.0:
-                        activated_skill = "preserve"; r.hp = min(r.hp + r.max_hp * 0.03, r.max_hp)
-                
-                if not activated_skill and pacemaker:
-                    u_limit = {"선행": 5.0, "선입": 7.0, "추입": 8.0}.get(r.style, 999) * self.race_mod
-                    if (pacemaker.dist - r.dist) > u_limit or r.is_nearby:
-                        if random.random() < (20 * math.log10(max(r.intel, 1) * 0.1)) / 100.0:
-                            activated_skill = "position"; r.hp -= 24 * (1.2 if r.style == "도주" else 1.0)
-                
-                if not activated_skill:
-                    lead_triggered = False
-                    for b in self.runners:
-                        if b.dist < r.dist:
-                            d_diff = r.dist - b.dist
-                            if r.style == "도주":
-                                if (b.style == "선행" and d_diff < 5.0) or (b.style in ["선입", "추입"] and d_diff < 9.0): lead_triggered = True
-                            elif r.style == "선행":
-                                if (b.style == "선입" and d_diff < 6.0) or (b.style == "추입" and d_diff < 7.0): lead_triggered = True
-                            elif r.style == "선입":
-                                if b.style == "추입" and d_diff < 4.0: lead_triggered = True
-                            if lead_triggered: break
-                    if lead_triggered:
-                        if random.random() < (20 * math.log10(max(r.intel, 1) * 0.1)) / 100.0:
-                            activated_skill = "lead"; r.hp -= 24 * (1.0 if r.style == "도주" else 0.8)
-
-                if activated_skill: r.stam_sys_active = activated_skill; r.stam_sys_timer = 2.0
-                else: r.stam_sys_cd = 2.0
-            
-            if r.stam_sys_active:
-                r.stam_sys_timer -= DT
-                if r.stam_sys_active == "preserve": stam_speed_mod = -0.25
-                elif r.stam_sys_active == "position":
-                    stam_speed_mod = ((math.pow(max(r.pow, 1) / 1500.0, 0.5) * 2.0 + math.pow(max(r.guts, 1) / 3000.0, 0.2)) * 0.1) * (0.8 if r.style == "도주" else 1.0)
-                elif r.stam_sys_active == "lead":
-                    mult_spd = 1.0 if r.style in ["도주", "선행"] else 0.8
-                    if r.style == "도주" and not any(o.style == "도주" and o.id != r.id and abs(o.dist - r.dist) <= 10.0 for o in self.runners): mult_spd = 4.0
-                    stam_speed_mod = math.pow(max(r.guts, 1) / 2000.0, 0.5) * 0.3 * mult_spd
-                if r.stam_sys_timer <= 0: r.stam_sys_active = None; r.stam_sys_cd = 1.0
-
-            t_mod = STYLE_MODS[r.style]["spd"][r.phase]
-            base_target_speed = self.base_speed * t_mod
-            spd_bonus = math.sqrt(500 * r.spd) * 0.002
-            guts_bonus = math.pow(450 * r.guts, 0.597) * 0.0001
-            spurt_target = (self.base_speed * STYLE_MODS[r.style]["spd"][2] + 0.01 * self.base_speed) * 1.05 + spd_bonus + guts_bonus
-
-            if r.hp <= 0: r.is_exhausted = True; r.is_spurting = False
             else:
-                r.is_exhausted = False 
-                if r.phase == 2 and not r.is_spurting:
-                    guts_drain_mod = 1.0 + 200.0 / math.sqrt(600 * max(r.guts, 1))
-                    req_hp = (((self.track_len - r.dist) - 60) / max(spurt_target, 1)) * ((20 * math.pow(spurt_target - self.base_speed + 12, 2) / 144.0) * guts_drain_mod)
-                    if r.hp >= req_hp: r.is_spurting = True
+                if self.time < r.start_delay:
+                    current_frame["r"].append([r.id, round(r.dist, 2), round(r.lane, 2), 0.0, int(r.hp), ["LateStart"]])
+                    continue
 
-            target_speed = base_target_speed * r.pace_mode_mod
-            if r.is_blocked and closest_blocker: target_speed = min(target_speed, closest_blocker.speed + 0.1)
-            if r.is_overtaking: target_speed *= 1.05
-            if r.is_evading: target_speed *= 1.04
-            
-            target_speed += stam_speed_mod
-            target_speed += r.skill_mod_target_speed 
-            
-            if r.is_exhausted: target_speed = (0.85 * self.base_speed) * (math.sqrt(200 * max(r.guts, 1)) * 0.001)
-            elif r.is_spurting: target_speed = spurt_target
-            
-            if r.dist >= self.track_len:
-                target_speed = self.base_speed * 0.4
-                r.is_spurting = False
-                r.pace_mode = "Normal"
-                r.is_overtaking = False
+                r.section = max(1, math.floor(r.dist / self.section_len) + 1)
+                if r.section <= 4: r.phase = 0
+                elif r.section <= 16: r.phase = 1
+                else: r.phase = 2
+
+                r.is_blocked = False; r.is_contested = False; r.is_followed = False; r.is_nearby = False
+                closest_blocker = None; min_block_dist = 999.0
+                contesting_runners = []
+
+                for o in self.runners:
+                    if o.id == r.id: continue
+                    dist_diff = o.dist - r.dist; lane_diff = abs(o.lane - r.lane)
+                    if 0 < dist_diff <= 2.0 and lane_diff <= (0.5 * 0.08):
+                        r.is_blocked = True
+                        if dist_diff < min_block_dist: min_block_dist = dist_diff; closest_blocker = o
+                    if abs(dist_diff) <= 1.0 and lane_diff <= (2.0 * 0.08): r.is_contested = True; contesting_runners.append(o)
+                    if 0 < -dist_diff <= 2.5 and lane_diff <= (1.0 * 0.08): r.is_followed = True
+                    if abs(dist_diff) <= 3.0 and lane_diff <= (3.0 * 0.08): r.is_nearby = True
+
+                if r.is_blocked: r.time_blocked += DT
+                else: r.time_blocked = 0
+                if r.is_contested: r.time_contested += DT
+                else: r.time_contested = 0
+                if r.is_followed: r.time_followed += DT
+                else: r.time_followed = 0
+                if r.dist > 1475: r.time_in_final_straight += DT
+
+                r.pow = r.base_pow; r.guts = r.base_guts
+                r.skill_mod_target_speed = 0.0; r.skill_mod_accel = 0.0
+                
+                for skill in r.owned_skills:
+                    if not skill["triggered"]:
+                        if self.check_skill_conditions(r, skill):
+                            skill["triggered"] = True
+                            r.active_states.append(f"SKILL|{skill['data']['name']}|{skill['data']['icon']}")
+                            for eff in skill["data"]["effects"]:
+                                targets = []
+                                if eff["target"] == "self": targets = [r]
+                                elif eff["target"] == "nearby": targets = [o for o in self.runners if o.id != r.id and abs(o.dist - r.dist) <= 3.0 and abs(o.lane - r.lane) <= (3.0 * 0.08)]
+                                elif eff["target"] == "front": targets = [o for o in self.runners if o.id != r.id and 0 < o.dist - r.dist <= 3.0]
+                                elif eff["target"] == "behind": targets = [o for o in self.runners if o.id != r.id and 0 < r.dist - o.dist <= 3.0]
+                                elif eff["target"] == "side": targets = [o for o in self.runners if o.id != r.id and abs(o.dist - r.dist) <= 1.0 and abs(o.lane - r.lane) <= (2.0 * 0.08)]
+                                elif eff["target"] == "all_enemies": targets = [o for o in self.runners if o.id != r.id]
+
+                                for t in targets:
+                                    if eff["type"] == "지구력 회복": t.hp = min(t.hp + t.max_hp * (eff["val"]/100.0), t.max_hp)
+                                    elif eff["type"] == "지구력 감소": t.hp = max(0, t.hp + t.max_hp * (eff["val"]/100.0))
+                                    elif eff["type"] == "현재 속도 증가": t.speed += eff["val"]
+                                    else: t.active_skills.append({"type": eff["type"], "val": eff["val"], "dur": eff["dur"]})
+
+                alive_skills = []
+                for askill in r.active_skills:
+                    if askill["type"] == "목표 속도 증가" or askill["type"] == "목표 속도 감소": r.skill_mod_target_speed += askill["val"]
+                    elif askill["type"] == "가속도 증가" or askill["type"] == "가속도 감소": r.skill_mod_accel += askill["val"]
+                    elif askill["type"] == "파워 증가" or askill["type"] == "파워 감소": r.pow += askill["val"]
+                    elif askill["type"] == "근성 증가" or askill["type"] == "근성 감소": r.guts += askill["val"]
+                    askill["dur"] -= DT
+                    if askill["dur"] > 0: alive_skills.append(askill)
+                r.active_skills = alive_skills
+
+                if r.section == r.kakari_target_section and not r.has_kakari_history:
+                    r.is_kakari = True; r.has_kakari_history = True; r.kakari_timer = 12.0
+                if r.is_kakari:
+                    r.kakari_timer -= DT
+                    if r.kakari_timer % 3.0 < DT and random.random() < 0.55: r.kakari_timer = 0
+                    if r.kakari_timer <= 0: r.is_kakari = False; r.style = r.original_style
+
+                if r.pace_eval_cd > 0: r.pace_eval_cd -= DT
+                if r.section > 10 and r.pace_mode != "Normal": r.pace_mode = "Normal"; r.pace_mode_mod = 1.0; r.pace_eval_cd = 0.0
+                    
+                if r.pace_mode != "Normal" and pacemaker:
+                    terminate = False
+                    behind_strats = {"도주": ["선행", "선입", "추입"], "선행": ["선입", "추입"], "선입": ["추입"], "추입": []}
+                    has_behind_enemy = any(o.dist > r.dist and o.style in behind_strats.get(r.style, []) for o in self.runners)
+                    dist_to_pm = pacemaker.dist - r.dist
+                    
+                    if r.pace_mode == "PaceUpEx":
+                        if not has_behind_enemy or r.section > r.pace_activation_section: terminate = True
+                    elif r.pace_mode == "PaceUp":
+                        if r.style == "도주":
+                            dist_to_closest_behind = min([r.dist - o.dist for o in self.runners if o.dist < r.dist] + [999])
+                            if dist_to_closest_behind >= 4.5: terminate = True
+                        else:
+                            if dist_to_pm <= r.pace_target_dist: terminate = True
+                    elif r.pace_mode == "Chase":
+                        if (r.dist - pacemaker.dist) >= 10.0 or r.section > r.pace_activation_section: terminate = True
+                    elif r.pace_mode == "PaceDown":
+                        if dist_to_pm <= r.pace_target_dist: terminate = True
+
+                    if terminate: r.pace_mode = "Normal"; r.pace_mode_mod = 1.0; r.pace_eval_cd = 1.0 
+
+                if pacemaker and r.section <= 10 and r.pace_eval_cd <= 0 and r.pace_mode == "Normal":
+                    if r.section not in r.is_pace_eval_passed:
+                        r.is_pace_eval_passed.add(r.section)
+                        is_escape = (r.style == "도주" or (pacemaker.style != "도주" and r.id == pacemaker.id))
+                        activated = False
+                        if is_escape:
+                            behind_strats = {"도주": ["선행", "선입", "추입"], "선행": ["선입", "추입"], "선입": ["추입"], "추입": []}
+                            if any(o.dist > r.dist and o.style in behind_strats[r.style] for o in self.runners):
+                                r.pace_mode = "PaceUpEx"; r.pace_mode_mod = 2.0; activated = True
+                            elif r.id == pacemaker.id:
+                                diff_2nd = pacemaker.dist - max([o.dist for o in self.runners if o.id != pacemaker.id] + [0])
+                                limit = 12.5 if sum(1 for o in self.runners if o.style == "도주") == 1 else 4.5
+                                if diff_2nd <= limit:
+                                    if random.random() < (1.0 if r.is_kakari else (20 * math.log10(max(r.intel, 1) * 0.1))/100.0): r.pace_mode = "PaceUp"; r.pace_mode_mod = 1.04; activated = True
+                                    else: r.pace_eval_cd = 2.0
+                            elif r.id != pacemaker.id: 
+                                if random.random() < (1.0 if r.is_kakari else (20 * math.log10(max(r.intel, 1) * 0.1))/100.0): r.pace_mode = "Chase"; r.pace_mode_mod = 1.05; activated = True
+                                else: r.pace_eval_cd = 2.0
+                        else:
+                            behind_strats = {"선행": ["선입", "추입"], "선입": ["추입"], "추입": []}
+                            if any(o.dist > r.dist and o.style in behind_strats.get(r.style, []) for o in self.runners):
+                                r.pace_mode = "PaceUpEx"; r.pace_mode_mod = 2.0; activated = True
+                            else:
+                                dist_diff = pacemaker.dist - r.dist
+                                upper = {"선행": 5.0, "선입": 7.0, "추입": 8.0}.get(r.style, 999) * self.race_mod
+                                lower = {"선행": 3.0, "선입": 6.5, "추입": 7.5}.get(r.style, 0) * (self.race_mod if r.style != "선행" else 1.0)
+                                if dist_diff < lower:
+                                    r.pace_mode = "PaceDown"; r.pace_mode_mod = 0.915 if r.phase == 0 else 0.945; activated = True
+                                    r.pace_target_dist = random.uniform(lower, upper)
+                                elif dist_diff >= upper:
+                                    if random.random() < (1.0 if r.is_kakari else (15 * math.log10(max(r.intel, 1) * 0.1))/100.0): r.pace_mode = "PaceUp"; r.pace_mode_mod = 1.04; activated = True; r.pace_target_dist = random.uniform(lower, upper)
+                                    else: r.pace_eval_cd = 2.0
+                        if activated: r.pace_activation_section = r.section
+
+                if r.overtake_eval_cd > 0: r.overtake_eval_cd -= DT
+                if r.is_overtaking:
+                    r.overtake_timer -= DT
+                    if r.overtake_timer <= 0: r.is_overtaking = False; r.overtake_eval_cd = 1.0; r.overtake_target = None; r.overtake_target_lane = None 
+                if r.is_evading:
+                    r.evade_timer -= DT
+                    if r.evade_timer <= 0: r.is_evading = False
+                
+                if r.section > 10 and r.overtake_eval_cd <= 0 and not r.is_overtaking:
+                    if r.is_blocked and closest_blocker:
+                        r.is_overtaking = True; r.overtake_timer = 1.5; r.overtake_eval_cd = 2.5
+                        r.overtake_target = closest_blocker 
+                        target_prob = (20 * math.log10(max(closest_blocker.intel, 1) * 0.1)) / 100.0
+                        if random.random() < target_prob: closest_blocker.is_evading = True; closest_blocker.evade_timer = 1.5
+                    else:
+                        for target in self.runners:
+                            if target.id == r.id: continue
+                            dist_diff = target.dist - r.dist
+                            if 0 < dist_diff <= 20.0:
+                                speed_diff = r.speed - target.speed
+                                time_to_catch = dist_diff / speed_diff if speed_diff > 0 else 999
+                                if (time_to_catch < 15.0 and r.target_speed > target.target_speed) or (target.is_blocked and r.target_speed > target.speed):
+                                    prob = (20 * math.log10(max(r.intel, 1) * 0.1)) / 100.0
+                                    if random.random() < prob:
+                                        r.is_overtaking = True; r.overtake_timer = 1.5; r.overtake_eval_cd = 2.5
+                                        r.overtake_target = target 
+                                        target_prob = (20 * math.log10(max(target.intel, 1) * 0.1)) / 100.0
+                                        if random.random() < target_prob: target.is_evading = True; target.evade_timer = 1.5
+                                    else: r.overtake_eval_cd = 2.0
+                                    break
+
+                stam_speed_mod = 0.0
+                if r.stam_sys_cd > 0: r.stam_sys_cd -= DT
+                if 11 <= r.section <= 15 and r.stam_sys_cd <= 0 and not r.stam_sys_active:
+                    activated_skill = None
+                    spd_b = math.sqrt(500 * r.spd) * 0.002; guts_b = math.pow(450 * r.guts, 0.597) * 0.0001
+                    s_targ = (self.base_speed * STYLE_MODS[r.style]["spd"][2] + 0.01 * self.base_speed) * 1.05 + spd_b + guts_b
+                    g_drain = 1.0 + 200.0 / math.sqrt(600 * max(r.guts, 1))
+                    req_hp_spurt = (((self.track_len - r.dist) - 60) / max(s_targ, 1)) * ((20 * math.pow(s_targ - self.base_speed + 12, 2) / 144.0) * g_drain)
+                    
+                    if r.hp < 1.05 * req_hp_spurt:
+                        if random.random() < (30 * math.pow(max(r.intel, 1) / 1000.0, 0.03)) / 100.0:
+                            activated_skill = "preserve"; r.hp = min(r.hp + r.max_hp * 0.03, r.max_hp)
+                    
+                    if not activated_skill and pacemaker:
+                        u_limit = {"선행": 5.0, "선입": 7.0, "추입": 8.0}.get(r.style, 999) * self.race_mod
+                        if (pacemaker.dist - r.dist) > u_limit or r.is_nearby:
+                            if random.random() < (20 * math.log10(max(r.intel, 1) * 0.1)) / 100.0:
+                                activated_skill = "position"; r.hp -= 24 * (1.2 if r.style == "도주" else 1.0)
+                    
+                    if not activated_skill:
+                        lead_triggered = False
+                        for b in self.runners:
+                            if b.dist < r.dist:
+                                d_diff = r.dist - b.dist
+                                if r.style == "도주":
+                                    if (b.style == "선행" and d_diff < 5.0) or (b.style in ["선입", "추입"] and d_diff < 9.0): lead_triggered = True
+                                elif r.style == "선행":
+                                    if (b.style == "선입" and d_diff < 6.0) or (b.style == "추입" and d_diff < 7.0): lead_triggered = True
+                                elif r.style == "선입":
+                                    if b.style == "추입" and d_diff < 4.0: lead_triggered = True
+                                if lead_triggered: break
+                        if lead_triggered:
+                            if random.random() < (20 * math.log10(max(r.intel, 1) * 0.1)) / 100.0:
+                                activated_skill = "lead"; r.hp -= 24 * (1.0 if r.style == "도주" else 0.8)
+
+                    if activated_skill: r.stam_sys_active = activated_skill; r.stam_sys_timer = 2.0
+                    else: r.stam_sys_cd = 2.0
+                
+                if r.stam_sys_active:
+                    r.stam_sys_timer -= DT
+                    if r.stam_sys_active == "preserve": stam_speed_mod = -0.25
+                    elif r.stam_sys_active == "position":
+                        stam_speed_mod = ((math.pow(max(r.pow, 1) / 1500.0, 0.5) * 2.0 + math.pow(max(r.guts, 1) / 3000.0, 0.2)) * 0.1) * (0.8 if r.style == "도주" else 1.0)
+                    elif r.stam_sys_active == "lead":
+                        mult_spd = 1.0 if r.style in ["도주", "선행"] else 0.8
+                        if r.style == "도주" and not any(o.style == "도주" and o.id != r.id and abs(o.dist - r.dist) <= 10.0 for o in self.runners): mult_spd = 4.0
+                        stam_speed_mod = math.pow(max(r.guts, 1) / 2000.0, 0.5) * 0.3 * mult_spd
+                    if r.stam_sys_timer <= 0: r.stam_sys_active = None; r.stam_sys_cd = 1.0
+
+                t_mod = STYLE_MODS[r.style]["spd"][r.phase]
+                base_target_speed = self.base_speed * t_mod
+                spd_bonus = math.sqrt(500 * r.spd) * 0.002
+                guts_bonus = math.pow(450 * r.guts, 0.597) * 0.0001
+                spurt_target = (self.base_speed * STYLE_MODS[r.style]["spd"][2] + 0.01 * self.base_speed) * 1.05 + spd_bonus + guts_bonus
+
+                if r.hp <= 0: r.is_exhausted = True; r.is_spurting = False
+                else:
+                    r.is_exhausted = False 
+                    if r.phase == 2 and not r.is_spurting:
+                        guts_drain_mod = 1.0 + 200.0 / math.sqrt(600 * max(r.guts, 1))
+                        req_hp = (((self.track_len - r.dist) - 60) / max(spurt_target, 1)) * ((20 * math.pow(spurt_target - self.base_speed + 12, 2) / 144.0) * guts_drain_mod)
+                        if r.hp >= req_hp: r.is_spurting = True
+
+                target_speed = base_target_speed * r.pace_mode_mod
+                if r.is_blocked and closest_blocker: target_speed = min(target_speed, closest_blocker.speed + 0.1)
+                if r.is_overtaking: target_speed *= 1.05
+                if r.is_evading: target_speed *= 1.04
+                
+                target_speed += stam_speed_mod
+                target_speed += r.skill_mod_target_speed 
+                
+                if r.is_exhausted: target_speed = (0.85 * self.base_speed) * (math.sqrt(200 * max(r.guts, 1)) * 0.001)
+                elif r.is_spurting: target_speed = spurt_target
                 
             r.target_speed = target_speed
 
@@ -675,7 +737,6 @@ class RaceSimulator:
 
             if r.bump_cd <= 0 and (dist_to_target_lane <= 0.04 or is_lane_path_blocked):
                 if r.is_overtaking and r.overtake_target:
-                    # 💡 [마군 방지 AI 픽스] 막히면 언제든 재탐색 허용
                     min_l, max_l = self.get_cluster_bounds(r.overtake_target)
                     c1 = min(1.5, max_l + 0.08) 
                     c2 = max(0.0, min_l - 0.08) 
@@ -780,7 +841,6 @@ def create_room_final():
         total_points = random.randint(4000, 4500) 
         raw_stats = {k: int(total_points * w) for k, w in STAT_WEIGHTS[style].items()}
         
-        # 💡 [피드백 반영] 극단적인 무한루프 회피를 위한 안전장치 추가
         safety_break = 0
         while any(v > 1200 for v in raw_stats.values()) and safety_break < 100:
             excess = 0
@@ -809,7 +869,6 @@ def create_room_final():
 @app.route('/api/room/<room_id>', methods=['GET'])
 def get_room(room_id):
     cleanup_old_rooms()
-    # 💡 [피드백 반영] 404 에러 시 튜플 문법 교정
     if room_id.upper() in ROOMS_DB:
         return jsonify({"success": True, "data": ROOMS_DB[room_id.upper()]})
     return jsonify({"success": False, "message": "방 없음"}), 404
