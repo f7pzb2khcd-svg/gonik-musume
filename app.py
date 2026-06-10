@@ -265,8 +265,10 @@ class RaceSimulator:
             self.time += DT
             safety += 1
             leader_dist = max(r.dist for r in self.runners)
+            # 선두가 2000m를 넘으면 타이머 시작
             if leader_dist >= self.track_len and first_finish_time is None:
                 first_finish_time = self.time
+            # 1등 통과 후 3초간 레이스를 더 진행시킴!
             if first_finish_time is not None and self.time >= first_finish_time + 3.0:
                 break
             if all(r.is_exhausted and r.speed < 1.0 for r in self.runners) and safety > 1000:
@@ -387,7 +389,12 @@ class RaceSimulator:
                 r.active_states.append(r.pending_ult)
                 r.pending_ult = None
                 
-            if r.dist >= self.track_len: continue
+            if r.dist >= self.track_len:
+                # 결승선 통과 후 겹치지 않게 조깅 감속
+                target_speed = self.base_speed * (0.4 + (r.id % 5) * 0.02)
+                r.is_spurting = False
+                r.pace_mode = "Normal"
+                r.is_overtaking = False
             
             if self.time < r.start_delay:
                 current_frame["r"].append([r.id, round(r.dist, 2), round(r.lane, 2), 0.0, int(r.hp), ["LateStart"]])
