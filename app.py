@@ -458,12 +458,20 @@ class RaceSimulator:
                 r.active_states.append(r.pending_ult)
                 r.pending_ult = None
                 
+            contesting_runners = []
+            closest_blocker = None
+            stam_speed_mod = 0.0
+                
             if r.dist >= self.track_len:
-                # 결승선 통과 후 겹치지 않게 조깅
                 target_speed = self.base_speed * (0.4 + (r.id % 5) * 0.02)
                 r.is_spurting = False
                 r.pace_mode = "Normal"
                 r.is_overtaking = False
+                
+                r.is_blocked = False
+                r.is_contested = False
+                r.is_followed = False
+                r.is_nearby = False
             else:
                 if self.time < r.start_delay:
                     current_frame["r"].append([r.id, round(r.dist, 2), round(r.lane, 2), 0.0, int(r.hp), ["LateStart"]])
