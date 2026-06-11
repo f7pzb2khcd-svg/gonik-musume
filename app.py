@@ -881,7 +881,7 @@ def create_room_final():
         runner = Uma(idx, p_name, style, raw_stats, random.choice([1.05, 1.02, 1.00, 0.98, 0.95]), track_len, start_lane, start_dist)
         
         # 50% 확률로 기본 스킨 + 색상 변경, 나머지는 커스텀 스킨 (색상 원본)
-        if random.random() < 0.5:
+        if random.random() < 0.3:
             runner.skin = "runner.png"
             runner.hue = random.choice([0, 45, 90, 135, 180, 225, 270, 315])
         else:
