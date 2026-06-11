@@ -4,6 +4,7 @@ import string
 import random
 import time
 import math
+import os
 from collections import deque
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -126,6 +127,7 @@ except Exception as e:
     print("skills.csv 파일 로드 실패:", e)
 
 ULT_DB = {}
+
 try:
     with open('ultimates.csv', 'r', encoding='utf-8-sig') as f:
         reader = csv.reader(f)
@@ -216,7 +218,7 @@ class Uma:
         self.skill_mod_target_speed = 0.0
         self.skill_mod_accel = 0.0
         self.pending_ult = None
-        self.pending_popups = [] # 💡 팝업 대기열 추가
+        self.pending_popups = []
 
 class RaceSimulator:
     def __init__(self, runners, track_len):
@@ -438,7 +440,6 @@ class RaceSimulator:
                         elif eff["target"] == "all_enemies": targets = [o for o in self.runners if o.id != ult_user.id]
 
                         for t in targets:
-                            # 💡 팝업 큐에 저장
                             t.pending_popups.append(f"POPUP|{eff['type']}|{seq}")
                             if eff["type"] == "지구력 회복": t.hp = min(t.hp + t.max_hp * (eff["val"]/100.0), t.max_hp)
                             elif eff["type"] == "지구력 감소": t.hp = max(0, t.hp + t.max_hp * (eff["val"]/100.0))
@@ -506,7 +507,6 @@ class RaceSimulator:
                 r.pow = r.base_pow; r.guts = r.base_guts
                 r.skill_mod_target_speed = 0.0; r.skill_mod_accel = 0.0
                 
-                # 💡 [일반 스킬 POPUP 효과 대상자 추적]
                 for skill in r.owned_skills:
                     if not skill["triggered"]:
                         if self.check_skill_conditions(r, skill):
@@ -522,14 +522,12 @@ class RaceSimulator:
                                 elif eff["target"] == "all_enemies": targets = [o for o in self.runners if o.id != r.id]
 
                                 for t in targets:
-                                    # 💡 팝업 큐에 저장
                                     t.pending_popups.append(f"POPUP|{eff['type']}|{seq}")
                                     if eff["type"] == "지구력 회복": t.hp = min(t.hp + t.max_hp * (eff["val"]/100.0), t.max_hp)
                                     elif eff["type"] == "지구력 감소": t.hp = max(0, t.hp + t.max_hp * (eff["val"]/100.0))
                                     elif eff["type"] == "현재 속도 증가": t.speed += eff["val"]
                                     else: t.active_skills.append({"type": eff["type"], "val": eff["val"], "dur": eff["dur"]})
 
-                # 💡 지속시간 동기화를 위한 변수
                 alive_skills = []
                 has_buff = False
                 has_debuff = False
@@ -547,7 +545,6 @@ class RaceSimulator:
                     if askill["dur"] > 0: alive_skills.append(askill)
                 r.active_skills = alive_skills
 
-                # 지속시간이 남은 스킬이 있다면 아우라 상태 발송
                 if has_buff: r.active_states.append("AuraBuff")
                 if has_debuff: r.active_states.append("AuraDebuff")
 
