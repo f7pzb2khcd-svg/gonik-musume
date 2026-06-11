@@ -125,7 +125,6 @@ try:
 except Exception as e:
     print("skills.csv 파일 로드 실패:", e)
 
-# 💡 [필살기 CSV 로드] 파일명이 ultimates.csv 인지 꼭 확인해주세요!
 ULT_DB = {}
 try:
     with open('ultimates.csv', 'r', encoding='utf-8-sig') as f:
@@ -216,8 +215,8 @@ class Uma:
         self.active_skills = []  
         self.skill_mod_target_speed = 0.0
         self.skill_mod_accel = 0.0
-        
         self.pending_ult = None
+        self.pending_popups = [] # 💡 팝업 대기열 추가
 
 class RaceSimulator:
     def __init__(self, runners, track_len):
@@ -406,7 +405,6 @@ class RaceSimulator:
         if self.time >= 2.0 or any(r.dist >= self.section_len for r in self.runners): self.start_phase_cleared = True
         if self.start_phase_cleared: pacemaker = self.get_pacemaker()
 
-        # 💡 [CSV 필살기 발동 로직] 21구간 진입 시 랜덤 1명 추첨하여 조건 맞는 필살기 발동!
         if pacemaker and pacemaker.section >= 21 and not self.ult_triggered:
             self.ult_triggered = True
             alive_runners = [r for r in self.runners if not r.is_exhausted]
@@ -414,8 +412,6 @@ class RaceSimulator:
                 random.shuffle(alive_runners)
                 ult_user = None
                 chosen_ult = None
-                
-                # 살아있는 주자들 중 조건에 맞는 필살기를 가진 주자 탐색
                 for r in alive_runners:
                     valid_ults = []
                     for u in ULT_DB.values():
@@ -427,13 +423,12 @@ class RaceSimulator:
                         chosen_ult = random.choice(valid_ults)
                         break
                 
-                # 만약 아무도 조건이 맞지 않으면 무조건 발동하는 필살기나 기본 필살기로 폴백
                 if not ult_user:
                     ult_user = random.choice(alive_runners)
                     chosen_ult = random.choice(list(ULT_DB.values())) if ULT_DB else {"name": "테스트 필살기", "sound": "ult_test.mp3", "effects": [{"target": "self", "type": "목표 속도 증가", "val": 0.5, "dur": 6.0}]}
 
                 if chosen_ult:
-                    for eff in chosen_ult["effects"]:
+                    for seq, eff in enumerate(chosen_ult["effects"]):
                         targets = []
                         if eff["target"] == "self": targets = [ult_user]
                         elif eff["target"] == "nearby": targets = [o for o in self.runners if o.id != ult_user.id and abs(o.dist - ult_user.dist) <= 3.0 and abs(o.lane - ult_user.lane) <= (3.0 * 0.08)]
@@ -443,10 +438,12 @@ class RaceSimulator:
                         elif eff["target"] == "all_enemies": targets = [o for o in self.runners if o.id != ult_user.id]
 
                         for t in targets:
+                            # 💡 팝업 큐에 저장
+                            t.pending_popups.append(f"POPUP|{eff['type']}|{seq}")
                             if eff["type"] == "지구력 회복": t.hp = min(t.hp + t.max_hp * (eff["val"]/100.0), t.max_hp)
                             elif eff["type"] == "지구력 감소": t.hp = max(0, t.hp + t.max_hp * (eff["val"]/100.0))
                             elif eff["type"] == "현재 속도 증가": t.speed += eff["val"]
-                            elif eff["type"] == "목표 속도 증가" or eff["type"] == "목표 속도 감소" or eff["type"] == "가속도 증가" or eff["type"] == "가속도 감소" or eff["type"] == "파워 증가" or eff["type"] == "파워 감소" or eff["type"] == "근성 증가" or eff["type"] == "근성 감소":
+                            elif eff["type"] in ["목표 속도 증가", "목표 속도 감소", "가속도 증가", "가속도 감소", "파워 증가", "파워 감소", "근성 증가", "근성 감소"]:
                                 t.active_skills.append({"type": eff["type"], "val": eff["val"], "dur": eff["dur"]})
                     
                     ult_user.pending_ult = f"ULT|{chosen_ult['name']}|{chosen_ult['sound']}"
@@ -458,6 +455,10 @@ class RaceSimulator:
                 r.active_states.append(r.pending_ult)
                 r.pending_ult = None
                 
+            if getattr(r, 'pending_popups', None):
+                r.active_states.extend(r.pending_popups)
+                r.pending_popups = []
+
             contesting_runners = []
             closest_blocker = None
             stam_speed_mod = 0.0
@@ -467,7 +468,6 @@ class RaceSimulator:
                 r.is_spurting = False
                 r.pace_mode = "Normal"
                 r.is_overtaking = False
-                
                 r.is_blocked = False
                 r.is_contested = False
                 r.is_followed = False
@@ -483,8 +483,7 @@ class RaceSimulator:
                 else: r.phase = 2
 
                 r.is_blocked = False; r.is_contested = False; r.is_followed = False; r.is_nearby = False
-                closest_blocker = None; min_block_dist = 999.0
-                contesting_runners = []
+                min_block_dist = 999.0
 
                 for o in self.runners:
                     if o.id == r.id: continue
@@ -507,12 +506,13 @@ class RaceSimulator:
                 r.pow = r.base_pow; r.guts = r.base_guts
                 r.skill_mod_target_speed = 0.0; r.skill_mod_accel = 0.0
                 
+                # 💡 [일반 스킬 POPUP 효과 대상자 추적]
                 for skill in r.owned_skills:
                     if not skill["triggered"]:
                         if self.check_skill_conditions(r, skill):
                             skill["triggered"] = True
                             r.active_states.append(f"SKILL|{skill['data']['name']}|{skill['data']['icon']}")
-                            for eff in skill["data"]["effects"]:
+                            for seq, eff in enumerate(skill["data"]["effects"]):
                                 targets = []
                                 if eff["target"] == "self": targets = [r]
                                 elif eff["target"] == "nearby": targets = [o for o in self.runners if o.id != r.id and abs(o.dist - r.dist) <= 3.0 and abs(o.lane - r.lane) <= (3.0 * 0.08)]
@@ -522,20 +522,34 @@ class RaceSimulator:
                                 elif eff["target"] == "all_enemies": targets = [o for o in self.runners if o.id != r.id]
 
                                 for t in targets:
+                                    # 💡 팝업 큐에 저장
+                                    t.pending_popups.append(f"POPUP|{eff['type']}|{seq}")
                                     if eff["type"] == "지구력 회복": t.hp = min(t.hp + t.max_hp * (eff["val"]/100.0), t.max_hp)
                                     elif eff["type"] == "지구력 감소": t.hp = max(0, t.hp + t.max_hp * (eff["val"]/100.0))
                                     elif eff["type"] == "현재 속도 증가": t.speed += eff["val"]
                                     else: t.active_skills.append({"type": eff["type"], "val": eff["val"], "dur": eff["dur"]})
 
+                # 💡 지속시간 동기화를 위한 변수
                 alive_skills = []
+                has_buff = False
+                has_debuff = False
+                
                 for askill in r.active_skills:
                     if askill["type"] == "목표 속도 증가" or askill["type"] == "목표 속도 감소": r.skill_mod_target_speed += askill["val"]
                     elif askill["type"] == "가속도 증가" or askill["type"] == "가속도 감소": r.skill_mod_accel += askill["val"]
                     elif askill["type"] == "파워 증가" or askill["type"] == "파워 감소": r.pow += askill["val"]
                     elif askill["type"] == "근성 증가" or askill["type"] == "근성 감소": r.guts += askill["val"]
+                    
+                    if "증가" in askill["type"] or "회복" in askill["type"]: has_buff = True
+                    elif "감소" in askill["type"]: has_debuff = True
+                        
                     askill["dur"] -= DT
                     if askill["dur"] > 0: alive_skills.append(askill)
                 r.active_skills = alive_skills
+
+                # 지속시간이 남은 스킬이 있다면 아우라 상태 발송
+                if has_buff: r.active_states.append("AuraBuff")
+                if has_debuff: r.active_states.append("AuraDebuff")
 
                 if r.section == r.kakari_target_section and not r.has_kakari_history:
                     r.is_kakari = True; r.has_kakari_history = True; r.kakari_timer = 12.0
@@ -844,6 +858,8 @@ def create_room_final():
         "추입": {'spd': 0.24, 'stam': 0.20, 'pow': 0.25, 'guts': 0.13, 'intel': 0.18}
     }
     
+    skinList = ['ti.png', 'nin.png', 'vic.png', 'cho.png', 'shal.png', 'skin01.png', 'skin02.png', 'skin03.png', 'skin04.png', 'skin05.png', 'skin06.png', 'skin07.png', 'skin08.png', 'skin21.png', 'skin22.png', 'skin23.png', 'skin24.png', 'skin25.png', 'skin31.png', 'skin32.png', 'skin33.png', 'skin34.png', 'skin35.png', 'skin36.png', 'skin41.png', 'skin42.png', 'skin43.png', 'skin51.png', 'skin52.png', 'skin53.png', 'skin54.png', 'skin55.png', 'skin61.png', 'skin62.png', 'skin63.png', 'skin64.png']
+    
     for idx, p_name in enumerate(data['participants']):
         style = random.choice(["도주", "선행", "선입", "추입"])
         total_points = random.randint(4000, 4500) 
@@ -865,10 +881,14 @@ def create_room_final():
         row = idx // 18; col = idx % 18
         start_lane = col * 0.08; start_dist = -row * 2.5 
         runner = Uma(idx, p_name, style, raw_stats, random.choice([1.05, 1.02, 1.00, 0.98, 0.95]), track_len, start_lane, start_dist)
+        
+        runner.skin = random.choice(skinList)
+        runner.hue = random.choice([0, 45, 90, 135, 180, 225, 270, 315])
         runners.append(runner)
         
     ROOMS_DB[room_id] = {
-        "url": data['url'], "participants": [{"id": r.id, "name": r.name, "style": r.style} for r in runners],
+        "url": data['url'], 
+        "participants": [{"id": r.id, "name": r.name, "style": r.style, "skin": r.skin, "hue": r.hue} for r in runners],
         "replay_data": RaceSimulator(runners, track_len).run(), "created_at": time.time(),
         "scheduled_time": data['scheduled_time'], "bgm": data.get('bgm', 'none'), "allow_custom_chat": data.get('allow_custom_chat', False)
     }
