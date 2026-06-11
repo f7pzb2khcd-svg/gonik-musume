@@ -94,6 +94,7 @@ def extract_only():
     return jsonify({"success": True, "participants": participants})
 
 SKILL_DB = {}
+                                                                                                        
 try:
     with open('skills.csv', 'r', encoding='utf-8-sig') as f:
         reader = csv.reader(f)
@@ -879,8 +880,14 @@ def create_room_final():
         start_lane = col * 0.08; start_dist = -row * 2.5 
         runner = Uma(idx, p_name, style, raw_stats, random.choice([1.05, 1.02, 1.00, 0.98, 0.95]), track_len, start_lane, start_dist)
         
-        runner.skin = random.choice(skinList)
-        runner.hue = random.choice([0, 45, 90, 135, 180, 225, 270, 315])
+        # 50% 확률로 기본 스킨 + 색상 변경, 나머지는 커스텀 스킨 (색상 원본)
+        if random.random() < 0.5:
+            runner.skin = "runner.png"
+            runner.hue = random.choice([0, 45, 90, 135, 180, 225, 270, 315])
+        else:
+            runner.skin = random.choice(skinList)
+            runner.hue = 0
+            
         runners.append(runner)
         
     ROOMS_DB[room_id] = {
