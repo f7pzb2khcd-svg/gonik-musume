@@ -220,8 +220,9 @@ class Uma:
         self.skill_mod_accel = 0.0
         self.pending_ult = None
         self.pending_popups = []
-        self.ult_part_timer = 0.0  # 필살기 좌우 벌림 효과 타이머
-        self.ult_part_dir = 0.0    # 벌림 방향 (+: 오른쪽, -: 왼쪽)
+        self.ult_part_timer = 0.0
+        self.ult_part_dir = 0.0
+        self.ult_part_origin = 0.0
 
 class RaceSimulator:
     def __init__(self, runners, track_len):
@@ -433,12 +434,13 @@ class RaceSimulator:
                     chosen_ult = random.choice(list(ULT_DB.values())) if ULT_DB else {"name": "테스트 필살기", "sound": "ult_test.mp3", "effects": [{"target": "self", "type": "목표 속도 증가", "val": 0.5, "dur": 6.0}]}
 
                 if chosen_ult:
-                    # 필살기 좌우 벌림 효과: 앞에 있는 주자들을 ult_user 레인 기준으로 양쪽으로 밀어냄
+                    # 필살기 좌우 벌림 효과: 앞에 있는 주자를 살짝만 비켜나게 (최대 0.3레인)
                     runners_ahead = [o for o in self.runners if o.id != ult_user.id and o.dist > ult_user.dist]
                     for o in runners_ahead:
                         part_dir = 1.0 if o.lane >= ult_user.lane else -1.0
-                        o.ult_part_timer = random.uniform(2.0, 3.0)
+                        o.ult_part_timer = random.uniform(1.2, 2.0)
                         o.ult_part_dir = part_dir
+                        o.ult_part_origin = o.lane  # 원래 레인 기록 (최대 변위 제한용)
 
                     for seq, eff in enumerate(chosen_ult["effects"]):
                         targets = []
@@ -522,6 +524,17 @@ class RaceSimulator:
                         if self.check_skill_conditions(r, skill):
                             skill["triggered"] = True
                             r.active_states.append(f"SKILL|{skill['data']['name']}|{skill['data']['icon']}")
+
+                            # 고유 스킬 발동 시: 바로 앞 주자들에게 너프 버전 벌림 (최대 0.15레인, 짧게)
+                            if skill["data"]["icon"] == "고유.png":
+                                nearby_ahead = [o for o in self.runners if o.id != r.id and 0 < o.dist - r.dist <= 4.0]
+                                for o in nearby_ahead:
+                                    if o.ult_part_timer <= 0:  # 이미 벌림 중이면 덮어쓰지 않음
+                                        o.ult_part_dir = 1.0 if o.lane >= r.lane else -1.0
+                                        o.ult_part_timer = random.uniform(0.6, 1.0)
+                                        o.ult_part_origin = o.lane
+                                        o._unique_part_max = 0.15  # 고유 스킬은 최대 0.15레인
+
                             for seq, eff in enumerate(skill["data"]["effects"]):
                                 targets = []
                                 if eff["target"] == "self": targets = [r]
@@ -761,9 +774,15 @@ class RaceSimulator:
             # 필살기 벌림 효과 처리
             if r.ult_part_timer > 0:
                 r.ult_part_timer -= DT
-                push_amount = 0.06 * DT * 60  # 프레임당 레인 이동량
-                r.lane = max(0.0, min(r.lane + r.ult_part_dir * push_amount, 1.5))
-                r.target_lane = r.lane  # 밀리는 동안 target도 같이 이동
+                push_amount = 0.018 * DT * 60
+                origin = getattr(r, 'ult_part_origin', r.lane)
+                max_disp = getattr(r, '_unique_part_max', 0.3)
+                new_lane = r.lane + r.ult_part_dir * push_amount
+                if abs(new_lane - origin) <= max_disp:
+                    r.lane = max(0.0, min(new_lane, 1.5))
+                    r.target_lane = r.lane
+            elif getattr(r, '_unique_part_max', None) is not None:
+                r._unique_part_max = None
             
             active_contesters = [o for o in contesting_runners if o.bump_cd <= 0]
             dist_to_target_lane = abs(r.lane - r.target_lane)
