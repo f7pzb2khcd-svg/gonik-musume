@@ -220,6 +220,8 @@ class Uma:
         self.skill_mod_accel = 0.0
         self.pending_ult = None
         self.pending_popups = []
+        self.ult_part_timer = 0.0  # 필살기 좌우 벌림 효과 타이머
+        self.ult_part_dir = 0.0    # 벌림 방향 (+: 오른쪽, -: 왼쪽)
 
 class RaceSimulator:
     def __init__(self, runners, track_len):
@@ -349,10 +351,10 @@ class RaceSimulator:
             is_final_corner = (1225 * scale <= r.dist <= 1475 * scale)
             is_final_straight = (r.dist > 1475 * scale)
             
-            if "코너 진입" in c and not (is_corner and r.dist - r.speed * DT * 15 < 200 * scale): return False
+            if "코너 진입" in c and "최종" not in c and not (is_corner and r.dist - r.speed * DT * 15 < 200 * scale): return False
             if "최종 코너 진입" in c and not (is_final_corner and r.dist - r.speed * DT * 15 < 1225 * scale): return False
             if "최종 직선 진입" in c and not (is_final_straight and r.dist - r.speed * DT * 15 < 1475 * scale): return False
-            if "직선 진입" in c and not (is_straight and r.dist - r.speed * DT * 15 < 400 * scale): return False
+            if "직선 진입" in c and "최종" not in c and not (is_straight and r.dist - r.speed * DT * 15 < 400 * scale): return False
             if "무작위 코너" in c and not is_corner: return False
             if "무작위 직선" in c and not is_straight: return False
             if "최종 코너" in c and "진입" not in c and not is_final_corner: return False
@@ -431,6 +433,13 @@ class RaceSimulator:
                     chosen_ult = random.choice(list(ULT_DB.values())) if ULT_DB else {"name": "테스트 필살기", "sound": "ult_test.mp3", "effects": [{"target": "self", "type": "목표 속도 증가", "val": 0.5, "dur": 6.0}]}
 
                 if chosen_ult:
+                    # 필살기 좌우 벌림 효과: 앞에 있는 주자들을 ult_user 레인 기준으로 양쪽으로 밀어냄
+                    runners_ahead = [o for o in self.runners if o.id != ult_user.id and o.dist > ult_user.dist]
+                    for o in runners_ahead:
+                        part_dir = 1.0 if o.lane >= ult_user.lane else -1.0
+                        o.ult_part_timer = random.uniform(2.0, 3.0)
+                        o.ult_part_dir = part_dir
+
                     for seq, eff in enumerate(chosen_ult["effects"]):
                         targets = []
                         if eff["target"] == "self": targets = [ult_user]
@@ -748,6 +757,14 @@ class RaceSimulator:
             r.dist += r.speed * DT
             
             if r.bump_cd > 0: r.bump_cd -= DT
+            
+            # 필살기 벌림 효과 처리
+            if r.ult_part_timer > 0:
+                r.ult_part_timer -= DT
+                push_amount = 0.06 * DT * 60  # 프레임당 레인 이동량
+                r.lane = max(0.0, min(r.lane + r.ult_part_dir * push_amount, 1.5))
+                r.target_lane = r.lane  # 밀리는 동안 target도 같이 이동
+            
             active_contesters = [o for o in contesting_runners if o.bump_cd <= 0]
             dist_to_target_lane = abs(r.lane - r.target_lane)
             is_lane_path_blocked = False
@@ -883,7 +900,7 @@ def create_room_final():
         # 50% 확률로 기본 스킨 + 색상 변경, 나머지는 커스텀 스킨 (색상 원본)
         if random.random() < 0.3:
             runner.skin = "runner.png"
-            runner.hue = random.choice([0, 45, 90, 135, 180, 225, 270, 315])
+            runner.hue = random.randint(0, 359)
         else:
             runner.skin = random.choice(skinList)
             runner.hue = 0
