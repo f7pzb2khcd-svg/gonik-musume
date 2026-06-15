@@ -781,8 +781,8 @@ class RaceSimulator:
                 if abs(new_lane - origin) <= max_disp:
                     r.lane = max(0.0, min(new_lane, 1.5))
                     r.target_lane = r.lane
-            elif getattr(r, '_unique_part_max', None) is not None:
-                r._unique_part_max = None
+            elif hasattr(r, '_unique_part_max'):
+                delattr(r, '_unique_part_max')
             
             active_contesters = [o for o in contesting_runners if o.bump_cd <= 0]
             dist_to_target_lane = abs(r.lane - r.target_lane)
