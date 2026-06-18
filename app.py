@@ -223,6 +223,7 @@ class Uma:
         self.ult_part_timer = 0.0
         self.ult_part_dir = 0.0
         self.ult_part_origin = 0.0
+        self._unique_part_max = 0.3
 
 class RaceSimulator:
     def __init__(self, runners, track_len):
@@ -421,9 +422,15 @@ class RaceSimulator:
                 for r in alive_runners:
                     valid_ults = []
                     for u in ULT_DB.values():
-                        mock_skill = {"target_dist": -1, "data": {"conditions": u["conditions"]}}
-                        if self.check_skill_conditions(r, mock_skill):
+                        # 조건이 없는 필살기는 항상 후보
+                        # 조건이 있는 필살기는 현재 상태에서 맞는 것만
+                        has_conditions = any(c.strip() for c in u["conditions"])
+                        if not has_conditions:
                             valid_ults.append(u)
+                        else:
+                            mock_skill = {"target_dist": -1, "data": {"conditions": u["conditions"]}}
+                            if self.check_skill_conditions(r, mock_skill):
+                                valid_ults.append(u)
                     if valid_ults:
                         ult_user = r
                         chosen_ult = random.choice(valid_ults)
@@ -775,14 +782,12 @@ class RaceSimulator:
             if r.ult_part_timer > 0:
                 r.ult_part_timer -= DT
                 push_amount = 0.018 * DT * 60
-                origin = getattr(r, 'ult_part_origin', r.lane)
-                max_disp = getattr(r, '_unique_part_max', 0.3)
                 new_lane = r.lane + r.ult_part_dir * push_amount
-                if abs(new_lane - origin) <= max_disp:
+                if abs(new_lane - r.ult_part_origin) <= r._unique_part_max:
                     r.lane = max(0.0, min(new_lane, 1.5))
                     r.target_lane = r.lane
-            elif hasattr(r, '_unique_part_max'):
-                delattr(r, '_unique_part_max')
+            else:
+                r._unique_part_max = 0.3  # 타이머 종료 후 기본값으로 복구
             
             active_contesters = [o for o in contesting_runners if o.bump_cd <= 0]
             dist_to_target_lane = abs(r.lane - r.target_lane)
