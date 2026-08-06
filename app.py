@@ -947,3 +947,7 @@ def get_room(room_id):
     return jsonify({"success": False, "message": "방 없음"}), 404
 
 if __name__ == '__main__': app.run(host='0.0.0.0', port=5000, debug=True)
+
+@app.route("/health", methods=["GET", "HEAD"])
+def health_check():
+    return {"status": "ok"}, 200
