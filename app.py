@@ -743,10 +743,13 @@ class RaceSimulator:
                 if r.is_evading: target_speed *= 1.04
                 
                 target_speed += stam_speed_mod
-                target_speed += r.skill_mod_target_speed 
                 
                 if r.is_exhausted: target_speed = (0.85 * self.base_speed) * (math.sqrt(200 * max(r.guts, 1)) * 0.001)
                 elif r.is_spurting: target_speed = spurt_target
+
+                # 필살기/스킬로 인한 목표 속도 보정은 탈진/스퍼트 여부와 무관하게 항상 반영되어야 함
+                # (이전에는 exhausted/spurting 분기가 이 값을 덮어써버려서 필살기 효과가 무시되는 버그가 있었음)
+                target_speed += r.skill_mod_target_speed
                 
             r.target_speed = target_speed
 
